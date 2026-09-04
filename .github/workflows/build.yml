@@ -22,11 +22,13 @@ jobs:
             bash curl build-essential fakeroot git perl dpkg xz-utils unzip zip rsync
 
       - name: Setup Theos and SDKs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export THEOS=$HOME/theos
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          rm -rf $THEOS/sdks
+          git clone --recursive https://github.com/theos/theos.git $THEOS
           git clone --depth=1 https://github.com/theos/sdks.git $THEOS/sdks
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Compile Debian Package
