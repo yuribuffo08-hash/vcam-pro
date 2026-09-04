@@ -12,6 +12,8 @@
 		<string>VCAMPrefsListController</string>
 		<key>isController</key>
 		<true/>
+		<key>icon</key>
+		<string>icon.png</string>
 		<key>label</key>
 		<string>Virtual Camera Pro</string>
 	</dict>
