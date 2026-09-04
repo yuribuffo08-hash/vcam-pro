@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
@@ -17,19 +17,14 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bash curl build-essential fakeroot git perl dpkg xz-utils unzip zip rsync
+          brew install dpkg ldid
 
       - name: Setup Theos and SDKs
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
           git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
           cp -r /tmp/sdks/* $THEOS/sdks/
-          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Compile Debian Package
