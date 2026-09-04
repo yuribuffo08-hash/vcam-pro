@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Stato Principale</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.vcam.pro</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>label</key>
+			<string>Abilita Virtual Camera</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Sorgente Multimediale</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>default</key>
+			<integer>1</integer>
+			<key>defaults</key>
+			<string>com.vcam.pro</string>
+			<key>key</key>
+			<string>sourceType</string>
+			<key>validTitles</key>
+			<array>
+				<string>Foto</string>
+				<string>Video</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>action</key>
+			<string>selectMediaFromGallery</string>
+			<key>label</key>
+			<string>Seleziona dalla Galleria 📁</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>default</key>
+			<string>/var/mobile/Media/DCIM/vcam_source.mp4</string>
+			<key>defaults</key>
+			<string>com.vcam.pro</string>
+			<key>key</key>
+			<string>mediaPath</string>
+			<key>placeholder</key>
+			<string>Percorso file locale...</string>
+			<key>label</key>
+			<string>File</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Opzioni Riproduzione</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.vcam.pro</string>
+			<key>key</key>
+			<string>loopEnabled</string>
+			<key>label</key>
+			<string>Ripeti Video in Continuo (Loop)</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Virtual Camera Pro per iOS 17 - Progetto Open Source</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>action</key>
+			<string>respringUserspace</string>
+			<key>label</key>
+			<string>Applica e Riavvia Userspace</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>Virtual Camera Pro</string>
+</dict>
+</plist>

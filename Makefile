@@ -1,14 +1,18 @@
-ARCHS = arm64 arm64e
 TARGET := iphone:clang:16.5:16.5
+ARCHS = arm64 arm64e
+THEOS_PACKAGE_SCHEME = rootless
 
-INSTALL_TARGET_PROCESSES = mediaserverd
-THEOS_PACKAGE_SCHEME=rootless
+INSTALL_TARGET_PROCESSES = mediaserverd Preferences
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = vcam
+TWEAK_NAME = VCamPro
 
-vcam_FILES = Tweak.x image_utils.m
-vcam_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+VCamPro_FILES = src/Tweak.x src/VCamEngine.m
+VCamPro_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreGraphics CoreImage
+VCamPro_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+SUBPROJECTS += vcamPrefs
+include $(THEOS_MAKE_PATH)/aggregate.mk
