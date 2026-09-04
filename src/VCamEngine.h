@@ -18,7 +18,9 @@ typedef NS_ENUM(NSInteger, VCamSourceType) {
 @property (nonatomic, copy) NSString *mediaPath;
 
 + (instancetype)sharedEngine;
+- (void)startListeningForNotifications;
 - (void)reloadPreferences;
+- (void)loadMedia;
 - (void)processFrame:(CVPixelBufferRef)targetPixelBuffer;
 
 @end

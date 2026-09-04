@@ -1,4 +1,4 @@
-TARGET := iphone:clang:16.5:16.5
+TARGET := iphone:clang:latest:15.0
 ARCHS = arm64 arm64e
 THEOS_PACKAGE_SCHEME = rootless
 
@@ -10,6 +10,6 @@ vcamPrefs_FILES = VCAMPrefsListController.m
 vcamPrefs_FRAMEWORKS = UIKit MobileCoreServices
 vcamPrefs_PRIVATE_FRAMEWORKS = Preferences
 vcamPrefs_INSTALL_PATH = /Library/PreferenceBundles
-vcamPrefs_CFLAGS = -fobjc-arc
+vcamPrefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/bundle.mk

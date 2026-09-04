@@ -21,6 +21,8 @@
 			<string>enabled</string>
 			<key>label</key>
 			<string>Abilita Virtual Camera</string>
+			<key>PostNotification</key>
+			<string>com.vcam.pro/preferencesChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -47,6 +49,8 @@
 				<integer>0</integer>
 				<integer>1</integer>
 			</array>
+			<key>PostNotification</key>
+			<string>com.vcam.pro/preferencesChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -69,6 +73,8 @@
 			<string>Percorso file locale...</string>
 			<key>label</key>
 			<string>File</string>
+			<key>PostNotification</key>
+			<string>com.vcam.pro/preferencesChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -87,6 +93,8 @@
 			<string>loopEnabled</string>
 			<key>label</key>
 			<string>Ripeti Video in Continuo (Loop)</string>
+			<key>PostNotification</key>
+			<string>com.vcam.pro/preferencesChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -100,7 +108,7 @@
 			<key>action</key>
 			<string>respringUserspace</string>
 			<key>label</key>
-			<string>Applica e Riavvia Userspace</string>
+			<string>Riavvia mediaserverd</string>
 		</dict>
 	</array>
 	<key>title</key>

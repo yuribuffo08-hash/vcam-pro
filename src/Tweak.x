@@ -22,6 +22,15 @@
         return;
     }
 
+    // Prevent double-processing identical PTS on multiple internal pipeline outputs
+    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    static CMTime lastProcessedPTS = {0};
+    if (CMTIME_IS_VALID(pts) && CMTIME_COMPARE_INLINE(pts, ==, lastProcessedPTS)) {
+        %orig(sampleBuffer);
+        return;
+    }
+    lastProcessedPTS = pts;
+
     VCamEngine *engine = [VCamEngine sharedEngine];
     if (engine.enabled) {
         [engine processFrame:imageBuffer];
@@ -34,6 +43,9 @@
 
 %ctor {
     @autoreleasepool {
-        [[VCamEngine sharedEngine] reloadPreferences];
+        VCamEngine *engine = [VCamEngine sharedEngine];
+        [engine startListeningForNotifications];
+        [engine reloadPreferences];
+        [engine loadMedia];
     }
 }

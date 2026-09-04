@@ -1,7 +1,9 @@
 #import "VCAMPrefsListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <MobileCoreServices/MobileCoreServices.h>
+#import <spawn.h>
 
+#define kVCamPrefsNotification CFSTR("com.vcam.pro/preferencesChanged")
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
 
 @implementation VCAMPrefsListController
@@ -11,6 +13,17 @@ static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.p
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
     return _specifiers;
+}
+
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    [super setPreferenceValue:value specifier:specifier];
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        kVCamPrefsNotification,
+        NULL,
+        NULL,
+        YES
+    );
 }
 
 - (void)selectMediaFromGallery {
@@ -50,6 +63,15 @@ static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.p
         dict[@"mediaPath"] = destinationPath;
         dict[@"sourceType"] = [mediaType isEqualToString:(NSString *)kUTTypeMovie] ? @(1) : @(0);
         [dict writeToFile:kPrefsPath atomically:YES];
+
+        // Broadcast change immediately to mediaserverd via Darwin notification
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            kVCamPrefsNotification,
+            NULL,
+            NULL,
+            YES
+        );
 
         [self reloadSpecifiers];
     }
