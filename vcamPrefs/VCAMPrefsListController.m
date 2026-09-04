@@ -84,8 +84,8 @@ static NSString *const kTypeMovie = @"public.movie";
 
 - (void)respringUserspace {
     pid_t pid;
-    const char *args[] = {"killall", "-9", "mediaserverd", NULL};
-    posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
+    const char *args[] = {"sbreload", NULL};
+    posix_spawn(&pid, "/var/jb/usr/bin/sbreload", NULL, NULL, (char *const *)args, NULL);
 }
 
 @end
