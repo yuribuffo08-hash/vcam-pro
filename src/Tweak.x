@@ -1,4 +1,5 @@
 #import "VCamEngine.h"
+#import "VCamLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -20,11 +21,15 @@
 
                 SEL targetSel = @selector(captureOutput:didOutputSampleBuffer:fromConnection:);
                 Method origMethod = class_getInstanceMethod(delegateClass, targetSel);
+                VCamLog(@"setSampleBufferDelegate: delegate=%@ hasCaptureOutput=%@",
+                        NSStringFromClass(delegateClass), origMethod ? @"YES" : @"NO");
                 if (origMethod) {
                     IMP origImp = method_getImplementation(origMethod);
 
-                    void (^swizzledBlock)(id, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = 
+                    void (^swizzledBlock)(id, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) =
                     ^(id selfDelegate, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+                        static dispatch_once_t frameOnce;
+                        dispatch_once(&frameOnce, ^{ VCamLog(@"first captureOutput frame delivered on %@", NSStringFromClass(delegateClass)); });
                         VCamEngine *engine = [VCamEngine sharedEngine];
                         if (engine.enabled && sampleBuffer) {
                             CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
@@ -37,6 +42,7 @@
 
                     IMP newImp = imp_implementationWithBlock(swizzledBlock);
                     class_replaceMethod(delegateClass, targetSel, newImp, method_getTypeEncoding(origMethod));
+                    VCamLog(@"hook installed on %@", NSStringFromClass(delegateClass));
                 }
             }
         }
@@ -65,6 +71,7 @@
             return;
         }
 
+        VCamLog(@"loaded in %@", bundleId);
         %init;
     }
 }

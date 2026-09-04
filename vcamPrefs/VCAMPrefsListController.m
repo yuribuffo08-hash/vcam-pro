@@ -1,9 +1,12 @@
 #import "VCAMPrefsListController.h"
+#import "../src/VCamLog.h"
 #import <Preferences/PSSpecifier.h>
 #import <spawn.h>
 
 #define kVCamPrefsNotification CFSTR("com.vcam.pro/preferencesChanged")
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
+static NSString *const kImageDest = @"/var/mobile/Library/Preferences/vcam_source.png";
+static NSString *const kVideoDest = @"/var/mobile/Library/Preferences/vcam_source.mp4";
 static NSString *const kTypeImage = @"public.image";
 static NSString *const kTypeMovie = @"public.movie";
 
@@ -46,16 +49,19 @@ static NSString *const kTypeMovie = @"public.movie";
     if ([mediaType isEqualToString:kTypeImage]) {
         UIImage *chosenImage = info[UIImagePickerControllerOriginalImage];
         if (chosenImage) {
-            destinationPath = @"/var/mobile/Media/DCIM/vcam_source.png";
+            destinationPath = kImageDest;
             NSData *data = UIImagePNGRepresentation(chosenImage);
-            [data writeToFile:destinationPath atomically:YES];
+            BOOL ok = [data writeToFile:destinationPath atomically:YES];
+            VCamLog(@"picker: saved image ok=%d path=%@ bytes=%lu", ok, destinationPath, (unsigned long)data.length);
         }
     } else if ([mediaType isEqualToString:kTypeMovie]) {
         NSURL *videoURL = info[UIImagePickerControllerMediaURL];
         if (videoURL) {
-            destinationPath = @"/var/mobile/Media/DCIM/vcam_source.mp4";
+            destinationPath = kVideoDest;
             [fm removeItemAtPath:destinationPath error:nil];
-            [fm copyItemAtPath:[videoURL path] toPath:destinationPath error:nil];
+            NSError *copyErr = nil;
+            BOOL ok = [fm copyItemAtPath:[videoURL path] toPath:destinationPath error:&copyErr];
+            VCamLog(@"picker: saved video ok=%d path=%@ err=%@", ok, destinationPath, copyErr.localizedDescription);
         }
     }
 

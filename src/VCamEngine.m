@@ -1,11 +1,15 @@
 #import "VCamEngine.h"
+#import "VCamLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <UIKit/UIKit.h>
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
-static NSString *const kDefaultVideoPath = @"/var/mobile/Media/DCIM/vcam_source.mp4";
-static NSString *const kDefaultImagePath = @"/var/mobile/Media/DCIM/vcam_source.png";
+// Media is stored alongside the prefs plist: that directory is reliably
+// readable from inside tweaked (sandboxed) target processes, unlike
+// /var/mobile/Media/DCIM which the app sandbox blocks.
+static NSString *const kDefaultVideoPath = @"/var/mobile/Library/Preferences/vcam_source.mp4";
+static NSString *const kDefaultImagePath = @"/var/mobile/Library/Preferences/vcam_source.png";
 static CFStringRef const kVCamPrefsNotification = CFSTR("com.vcam.pro/preferencesChanged");
 
 static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -76,6 +80,9 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
 - (void)reloadPreferences {
     [_lock lock];
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+    VCamLog(@"reloadPreferences: prefsReadable=%@ enabled=%@ sourceType=%@ mediaPath=%@",
+            prefs ? @"YES" : @"NO",
+            prefs[@"enabled"], prefs[@"sourceType"], prefs[@"mediaPath"]);
     if (prefs) {
         if (prefs[@"enabled"] != nil) {
             _enabled = [prefs[@"enabled"] boolValue];
@@ -160,11 +167,13 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
 
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:_mediaPath]) {
+        VCamLog(@"loadMedia: mediaPath NOT found: %@", _mediaPath);
         if (_sourceType == VCamSourceTypeVideo && [fm fileExistsAtPath:kDefaultVideoPath]) {
             _mediaPath = kDefaultVideoPath;
         } else if (_sourceType == VCamSourceTypeImage && [fm fileExistsAtPath:kDefaultImagePath]) {
             _mediaPath = kDefaultImagePath;
         } else {
+            VCamLog(@"loadMedia: no usable media file (sandbox block or not selected) -> nothing to inject");
             _mediaLoaded = YES;
             [_lock unlock];
             return;
@@ -178,11 +187,15 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
         if (img && img.CGImage) {
             _loadedCGImage = CGImageRetain(img.CGImage);
         }
+        VCamLog(@"loadMedia: image %@ loaded=%@ size=%.0fx%.0f",
+                _mediaPath, _loadedCGImage ? @"YES" : @"NO",
+                img ? img.size.width : 0, img ? img.size.height : 0);
     } else if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"]) {
         _sourceType = VCamSourceTypeVideo;
         NSURL *videoURL = [NSURL fileURLWithPath:_mediaPath];
         _videoAsset = [AVAsset assetWithURL:videoURL];
-        [self setupVideoReader];
+        BOOL ok = [self setupVideoReader];
+        VCamLog(@"loadMedia: video %@ readerStarted=%@", _mediaPath, ok ? @"YES" : @"NO");
     }
 
     _mediaLoaded = YES;
@@ -193,6 +206,9 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     if (!_enabled || !targetPixelBuffer) {
         return;
     }
+
+    static dispatch_once_t enterOnce;
+    dispatch_once(&enterOnce, ^{ VCamLog(@"processFrame: first call, enabled=%d sourceType=%ld", (int)_enabled, (long)_sourceType); });
 
     if (!_mediaLoaded) {
         [self loadMedia];
@@ -279,6 +295,8 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
         CIImage *final = [scaled imageByApplyingTransform:CGAffineTransformMakeTranslation(offsetX, offsetY)];
 
         [_ciContext render:final toCVPixelBuffer:targetPixelBuffer];
+        static dispatch_once_t renderOnce;
+        dispatch_once(&renderOnce, ^{ VCamLog(@"processFrame: first render into %zux%zu target buffer", targetW, targetH); });
 
         if (videoSampleToRelease) {
             CFRelease(videoSampleToRelease);
