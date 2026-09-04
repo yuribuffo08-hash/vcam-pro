@@ -31,7 +31,10 @@ jobs:
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
           git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
-          cp -r /tmp/sdks/*.sdk $THEOS/sdks/
+          # Only the iPhoneOS SDK is needed; rsync -a preserves the SDK's
+          # framework symlinks (macOS `cp -r` dereferences and dies on the
+          # broken AppleTVOS symlinks bundled in the repo).
+          rsync -a /tmp/sdks/iPhoneOS*.sdk $THEOS/sdks/
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Compile Debian Package
