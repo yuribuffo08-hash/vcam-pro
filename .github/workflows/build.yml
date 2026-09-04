@@ -9,25 +9,29 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # macOS runner: only Apple's real toolchain emits a valid arm64e slice
+    # (with correct Pointer Authentication) that iOS 17 can dlopen AND execute.
+    # The Linux/Theos toolchain produces an arm64e slice that loads but crashes
+    # at runtime on A12+ devices -> Preferences.app crash when opening the panel.
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+
+      - name: Install packaging tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bash curl build-essential fakeroot git perl dpkg xz-utils unzip zip rsync
+          brew install dpkg ldid xz
 
       - name: Setup Theos and SDKs
         run: |
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
           git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
-          cp -r /tmp/sdks/* $THEOS/sdks/
-          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
+          cp -r /tmp/sdks/*.sdk $THEOS/sdks/
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Compile Debian Package
