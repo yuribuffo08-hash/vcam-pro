@@ -1,10 +1,11 @@
 #import "VCAMPrefsListController.h"
 #import <Preferences/PSSpecifier.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 #import <spawn.h>
 
 #define kVCamPrefsNotification CFSTR("com.vcam.pro/preferencesChanged")
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
+static NSString *const kTypeImage = @"public.image";
+static NSString *const kTypeMovie = @"public.movie";
 
 @implementation VCAMPrefsListController
 
@@ -30,7 +31,7 @@ static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.p
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
     picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.mediaTypes = @[(NSString *)kUTTypeImage, (NSString *)kUTTypeMovie];
+    picker.mediaTypes = @[kTypeImage, kTypeMovie];
     picker.allowsEditing = NO;
     [self presentViewController:picker animated:YES completion:nil];
 }
@@ -42,14 +43,14 @@ static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.p
     NSString *destinationPath = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    if ([mediaType isEqualToString:(NSString *)kUTTypeImage]) {
+    if ([mediaType isEqualToString:kTypeImage]) {
         UIImage *chosenImage = info[UIImagePickerControllerOriginalImage];
         if (chosenImage) {
             destinationPath = @"/var/mobile/Media/DCIM/vcam_source.png";
             NSData *data = UIImagePNGRepresentation(chosenImage);
             [data writeToFile:destinationPath atomically:YES];
         }
-    } else if ([mediaType isEqualToString:(NSString *)kUTTypeMovie]) {
+    } else if ([mediaType isEqualToString:kTypeMovie]) {
         NSURL *videoURL = info[UIImagePickerControllerMediaURL];
         if (videoURL) {
             destinationPath = @"/var/mobile/Media/DCIM/vcam_source.mp4";
@@ -61,7 +62,7 @@ static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.p
     if (destinationPath) {
         NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
         dict[@"mediaPath"] = destinationPath;
-        dict[@"sourceType"] = [mediaType isEqualToString:(NSString *)kUTTypeMovie] ? @(1) : @(0);
+        dict[@"sourceType"] = [mediaType isEqualToString:kTypeMovie] ? @(1) : @(0);
         [dict writeToFile:kPrefsPath atomically:YES];
 
         // Broadcast change immediately to mediaserverd via Darwin notification
