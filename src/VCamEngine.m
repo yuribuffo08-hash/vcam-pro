@@ -62,8 +62,45 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     CIContext *_ciContext;
     NSLock *_lock;
     BOOL _mediaLoaded;
+    BOOL _debugFill;   // solid-colour test: see if the buffer we write feeds the preview
+    BOOL _loggedFormat;
 }
 @end
+
+// FourCC (e.g. '420v', 'BGRA') of a pixel format, for logging.
+static NSString *VCamFourCC(OSType t) {
+    char c[5] = { (char)((t >> 24) & 0xFF), (char)((t >> 16) & 0xFF),
+                  (char)((t >> 8) & 0xFF), (char)(t & 0xFF), 0 };
+    return [NSString stringWithFormat:@"%s", c];
+}
+
+// Fill a pixel buffer with a solid colour, handling BGRA and biplanar YUV.
+// Purely a diagnostic: if the on-screen preview turns this colour, the buffer
+// we overwrite is the one the app displays; if not, the preview is a separate
+// path (e.g. AVCaptureVideoPreviewLayer) our hook cannot reach.
+static void VCamFillSolid(CVPixelBufferRef pb) {
+    if (CVPixelBufferLockBaseAddress(pb, 0) != kCVReturnSuccess) return;
+    OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+    if (CVPixelBufferIsPlanar(pb)) {
+        // Y plane -> mid, CbCr -> shifted => vivid magenta-ish, unmistakable.
+        void *yPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+        size_t yBpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+        size_t yH = CVPixelBufferGetHeightOfPlane(pb, 0);
+        if (yPlane) memset(yPlane, 0x80, yBpr * yH);
+        if (CVPixelBufferGetPlaneCount(pb) > 1) {
+            void *cPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+            size_t cBpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+            size_t cH = CVPixelBufferGetHeightOfPlane(pb, 1);
+            if (cPlane) memset(cPlane, 0xFF, cBpr * cH);
+        }
+    } else {
+        void *base = CVPixelBufferGetBaseAddress(pb);
+        size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+        size_t h = CVPixelBufferGetHeight(pb);
+        if (base) memset(base, (fmt == kCVPixelFormatType_32BGRA) ? 0xC0 : 0x80, bpr * h);
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+}
 
 @implementation VCamEngine
 
@@ -87,15 +124,20 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
         _mediaLoaded = NO;
         _videoReadingStarted = NO;
 
-        NSDictionary *options = @{
-            kCIContextUseSoftwareRenderer: @(NO),
-            kCIContextWorkingColorSpace: [NSNull null],
-            kCIContextOutputColorSpace: [NSNull null]
-        };
-        _ciContext = [CIContext contextWithOptions:options];
+        // NOTE: do NOT null out the output/working colour spaces. Camera buffers
+        // are usually YUV (420v/420f); with colour management disabled CIContext
+        // will not perform the RGB->YUV conversion and render:toCVPixelBuffer:
+        // effectively no-ops, which is why injected frames never showed.
+        _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
         if (!_ciContext) {
             _ciContext = [CIContext context];
         }
+
+        // Diagnostic toggle: create this file in Filza to force a solid-colour
+        // fill (no rebuild needed) and see whether the preview reacts.
+        _debugFill = [NSFileManager.defaultManager fileExistsAtPath:
+            @"/var/jb/var/mobile/Library/Preferences/vcam_testfill"];
+        _loggedFormat = NO;
 
         [self probeSharedPaths];
         [self reloadPreferences];
@@ -281,6 +323,28 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     static dispatch_once_t enterOnce;
     dispatch_once(&enterOnce, ^{ VCamLog(@"processFrame: first call, enabled=%d sourceType=%ld", (int)_enabled, (long)_sourceType); });
 
+    // Log the real target format once: tells us YUV vs BGRA, size, IOSurface.
+    if (!_loggedFormat) {
+        _loggedFormat = YES;
+        OSType fmt = CVPixelBufferGetPixelFormatType(targetPixelBuffer);
+        VCamLog(@"processFrame: target fmt=%@(0x%08x) %zux%zu planar=%d iosurface=%d",
+                VCamFourCC(fmt), (unsigned)fmt,
+                CVPixelBufferGetWidth(targetPixelBuffer),
+                CVPixelBufferGetHeight(targetPixelBuffer),
+                CVPixelBufferIsPlanar(targetPixelBuffer),
+                CVPixelBufferGetIOSurface(targetPixelBuffer) != NULL);
+    }
+
+    // Diagnostic: paint the buffer a solid colour and stop. If the preview turns
+    // that colour, this buffer IS what the app shows and the render path is the
+    // bug; if the preview is unchanged, the app draws from a separate path.
+    if (_debugFill) {
+        VCamFillSolid(targetPixelBuffer);
+        static dispatch_once_t fillOnce;
+        dispatch_once(&fillOnce, ^{ VCamLog(@"processFrame: DEBUG solid fill active (vcam_testfill present)"); });
+        return;
+    }
+
     if (!_mediaLoaded) {
         [self loadMedia];
     }
@@ -329,12 +393,7 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
         }
 
         if (!_ciContext) {
-            NSDictionary *options = @{
-                kCIContextUseSoftwareRenderer: @(NO),
-                kCIContextWorkingColorSpace: [NSNull null],
-                kCIContextOutputColorSpace: [NSNull null]
-            };
-            _ciContext = [CIContext contextWithOptions:options];
+            _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
             if (!_ciContext) {
                 _ciContext = [CIContext context];
             }
