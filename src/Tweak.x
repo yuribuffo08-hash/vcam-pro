@@ -1,51 +1,54 @@
 #import "VCamEngine.h"
+#import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-%hook BWNodeOutput
+%hook AVCaptureVideoDataOutput
 
-- (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    if (!sampleBuffer) {
-        %orig(sampleBuffer);
-        return;
+- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
+    if (sampleBufferDelegate) {
+        Class delegateClass = [sampleBufferDelegate class];
+        static NSMutableSet *hookedClasses = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            hookedClasses = [[NSMutableSet alloc] init];
+        });
+
+        @synchronized(hookedClasses) {
+            if (![hookedClasses containsObject:delegateClass]) {
+                [hookedClasses addObject:delegateClass];
+
+                SEL targetSel = @selector(captureOutput:didOutputSampleBuffer:fromConnection:);
+                Method origMethod = class_getInstanceMethod(delegateClass, targetSel);
+                if (origMethod) {
+                    IMP origImp = method_getImplementation(origMethod);
+
+                    void (^swizzledBlock)(id, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) = 
+                    ^(id selfDelegate, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+                        VCamEngine *engine = [VCamEngine sharedEngine];
+                        if (engine.enabled && sampleBuffer) {
+                            CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+                            if (pixelBuffer) {
+                                [engine processFrame:pixelBuffer];
+                            }
+                        }
+                        ((void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp)(selfDelegate, targetSel, output, sampleBuffer, connection);
+                    };
+
+                    IMP newImp = imp_implementationWithBlock(swizzledBlock);
+                    class_replaceMethod(delegateClass, targetSel, newImp, method_getTypeEncoding(origMethod));
+                }
+            }
+        }
     }
 
-    unsigned int mediaType = ((unsigned int (*)(id, SEL))objc_msgSend)(self, sel_registerName("mediaType"));
-    if (mediaType != 'vide') {
-        %orig(sampleBuffer);
-        return;
-    }
-
-    CVPixelBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (imageBuffer == NULL) {
-        %orig(sampleBuffer);
-        return;
-    }
-
-    // Prevent double-processing identical PTS on multiple internal pipeline outputs
-    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-    static CMTime lastProcessedPTS = {0};
-    if (CMTIME_IS_VALID(pts) && CMTIME_COMPARE_INLINE(pts, ==, lastProcessedPTS)) {
-        %orig(sampleBuffer);
-        return;
-    }
-    lastProcessedPTS = pts;
-
-    VCamEngine *engine = [VCamEngine sharedEngine];
-    if (engine.enabled) {
-        [engine processFrame:imageBuffer];
-    }
-
-    %orig(sampleBuffer);
+    %orig(sampleBufferDelegate, sampleBufferCallbackQueue);
 }
 
 %end
 
 %ctor {
     @autoreleasepool {
-        VCamEngine *engine = [VCamEngine sharedEngine];
-        [engine startListeningForNotifications];
-        [engine reloadPreferences];
-        [engine loadMedia];
+        [[VCamEngine sharedEngine] reloadPreferences];
     }
 }
