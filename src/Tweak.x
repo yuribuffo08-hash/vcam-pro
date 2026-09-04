@@ -46,9 +46,3 @@
 }
 
 %end
-
-%ctor {
-    @autoreleasepool {
-        [[VCamEngine sharedEngine] reloadPreferences];
-    }
-}

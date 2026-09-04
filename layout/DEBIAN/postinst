@@ -1,0 +1,6 @@
+#!/bin/sh
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/vcam.dylib
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/vcam.plist
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/w2.dylib
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/w2.plist
+exit 0
