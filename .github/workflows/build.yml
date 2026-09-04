@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -17,7 +17,9 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install dpkg ldid
+          sudo apt-get update
+          sudo apt-get install -y \
+            bash curl build-essential fakeroot git perl dpkg xz-utils unzip zip rsync
 
       - name: Setup Theos and SDKs
         run: |
