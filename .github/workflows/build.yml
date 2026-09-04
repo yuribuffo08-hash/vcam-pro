@@ -27,7 +27,8 @@ jobs:
         run: |
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
-          git clone --depth=1 https://github.com/theos/sdks.git $THEOS/sdks
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
+          cp -r /tmp/sdks/* $THEOS/sdks/
           curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
