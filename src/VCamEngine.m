@@ -434,6 +434,76 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     }
 }
 
+#pragma mark - Still capture (photo path)
+
+// Current fake frame as a CIImage. For video, reads the next frame (looping).
+// Caller must CFRelease *sampleOut if non-NULL after it is done with the image.
+- (CIImage *)currentStillCIImage:(CMSampleBufferRef *)sampleOut {
+    if (sampleOut) *sampleOut = NULL;
+    if (!_mediaLoaded) [self loadMedia];
+
+    CIImage *img = nil;
+    [_lock lock];
+    @try {
+        if (_sourceType == VCamSourceTypeImage) {
+            if (_loadedCGImage) img = [CIImage imageWithCGImage:_loadedCGImage];
+        } else {
+            if (!_videoReadingStarted) [self setupVideoReader];
+            if (_readerOutput) {
+                CMSampleBufferRef s = [_readerOutput copyNextSampleBuffer];
+                if (!s && _loopEnabled) {
+                    [self setupVideoReader];
+                    if (_readerOutput) s = [_readerOutput copyNextSampleBuffer];
+                }
+                if (s) {
+                    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(s);
+                    if (pb) {
+                        img = [CIImage imageWithCVPixelBuffer:pb];
+                        if (sampleOut) *sampleOut = s; else CFRelease(s);
+                    } else {
+                        CFRelease(s);
+                    }
+                }
+            }
+        }
+    } @finally {
+        [_lock unlock];
+    }
+    return img;
+}
+
+- (CGImageRef)copyCurrentStillCGImage {
+    if (!_enabled) return NULL;
+    CGImageRef cg = NULL;
+    @autoreleasepool {
+        CMSampleBufferRef s = NULL;
+        CIImage *img = [self currentStillCIImage:&s];
+        if (img) {
+            if (!_ciContext) {
+                _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+                if (!_ciContext) _ciContext = [CIContext context];
+            }
+            if (_ciContext) cg = [_ciContext createCGImage:img fromRect:img.extent];
+        }
+        if (s) CFRelease(s);
+    }
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ VCamLog(@"copyCurrentStillCGImage: first still %@", cg ? @"produced" : @"FAILED"); });
+    return cg; // +1, caller releases
+}
+
+- (NSData *)currentStillJPEG {
+    CGImageRef cg = [self copyCurrentStillCGImage];
+    if (!cg) return nil;
+    NSData *data = nil;
+    @autoreleasepool {
+        UIImage *ui = [UIImage imageWithCGImage:cg];
+        data = UIImageJPEGRepresentation(ui, 0.95);
+    }
+    CGImageRelease(cg);
+    return data;
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),

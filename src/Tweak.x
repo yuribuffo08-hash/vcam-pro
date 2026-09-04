@@ -4,6 +4,40 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+// ---------------------------------------------------------------------------
+// Photo path. Apps that take a still use AVCapturePhotoOutput and read the
+// result from the AVCapturePhoto handed to their delegate — NOT from the video
+// data-output stream. Overriding these accessors replaces the captured photo
+// with the fake frame, so the photo the app saves/sends is ours.
+// ---------------------------------------------------------------------------
+%hook AVCapturePhoto
+
+- (NSData *)fileDataRepresentation {
+    VCamEngine *engine = [VCamEngine sharedEngine];
+    if (engine.enabled) {
+        NSData *fake = [engine currentStillJPEG];
+        if (fake.length) {
+            VCamLog(@"AVCapturePhoto.fileDataRepresentation -> fake %lu bytes", (unsigned long)fake.length);
+            return fake;
+        }
+    }
+    return %orig;
+}
+
+- (CGImageRef)CGImageRepresentation {
+    VCamEngine *engine = [VCamEngine sharedEngine];
+    if (engine.enabled) {
+        CGImageRef cg = [engine copyCurrentStillCGImage];
+        if (cg) {
+            VCamLog(@"AVCapturePhoto.CGImageRepresentation -> fake image");
+            return (CGImageRef)CFAutorelease(cg); // valid for the callback scope
+        }
+    }
+    return %orig;
+}
+
+%end
+
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
