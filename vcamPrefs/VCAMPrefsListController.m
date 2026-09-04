@@ -4,9 +4,13 @@
 #import <spawn.h>
 
 #define kVCamPrefsNotification CFSTR("com.vcam.pro/preferencesChanged")
-static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
-static NSString *const kImageDest = @"/var/mobile/Library/Preferences/vcam_source.png";
-static NSString *const kVideoDest = @"/var/mobile/Library/Preferences/vcam_source.mp4";
+// Shared storage lives in the ROOTLESS apex so injected App Store apps can read
+// it (the sandbox blocks /var/mobile/Library/Preferences for those targets).
+static NSString *const kSharedDir = @"/var/jb/var/mobile/Library/Preferences";
+static NSString *const kLegacyDir = @"/var/mobile/Library/Preferences";
+static NSString *const kPrefsPath = @"/var/jb/var/mobile/Library/Preferences/com.vcam.pro.plist";
+static NSString *const kImageDest = @"/var/jb/var/mobile/Library/Preferences/vcam_source.png";
+static NSString *const kVideoDest = @"/var/jb/var/mobile/Library/Preferences/vcam_source.mp4";
 static NSString *const kTypeImage = @"public.image";
 static NSString *const kTypeMovie = @"public.movie";
 
@@ -15,12 +19,59 @@ static NSString *const kTypeMovie = @"public.movie";
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        [self seedSharedStore];
     }
     return _specifiers;
 }
 
+// Ensure the rootless shared store exists and carries the current settings +
+// media, migrating anything previously saved under the legacy (sandbox-blocked
+// for targets) location so the user keeps their selection after upgrading.
+- (void)seedSharedStore {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:kSharedDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    NSDictionary *legacyPrefs = [NSDictionary dictionaryWithContentsOfFile:
+        [kLegacyDir stringByAppendingPathComponent:@"com.vcam.pro.plist"]];
+    NSMutableDictionary *shared = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath]
+        ?: [NSMutableDictionary dictionary];
+    if (legacyPrefs) {
+        for (NSString *k in @[@"enabled", @"sourceType", @"loopEnabled", @"mediaPath"]) {
+            if (legacyPrefs[k] != nil && shared[k] == nil) shared[k] = legacyPrefs[k];
+        }
+    }
+    // A migrated mediaPath points at the legacy dir; rewrite it to the shared one.
+    NSString *mp = shared[@"mediaPath"];
+    if ([mp hasPrefix:kLegacyDir]) {
+        shared[@"mediaPath"] = [kSharedDir stringByAppendingPathComponent:[mp lastPathComponent]];
+    }
+    [shared writeToFile:kPrefsPath atomically:YES];
+
+    for (NSString *fn in @[@"vcam_source.mp4", @"vcam_source.png"]) {
+        NSString *oldP = [kLegacyDir stringByAppendingPathComponent:fn];
+        NSString *newP = [kSharedDir stringByAppendingPathComponent:fn];
+        if ([fm fileExistsAtPath:oldP] && ![fm fileExistsAtPath:newP]) {
+            [fm copyItemAtPath:oldP toPath:newP error:nil];
+        }
+    }
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
+
+    // CFPreferences (PreferenceLoader "defaults") writes to the legacy location
+    // that target sandboxes can't read, so mirror each change into the shared
+    // rootless plist that the engine actually reads.
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (key.length && value) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:kSharedDir
+            withIntermediateDirectories:YES attributes:nil error:nil];
+        NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath]
+            ?: [NSMutableDictionary dictionary];
+        dict[key] = value;
+        [dict writeToFile:kPrefsPath atomically:YES];
+    }
+
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
         kVCamPrefsNotification,
@@ -45,6 +96,7 @@ static NSString *const kTypeMovie = @"public.movie";
     NSString *mediaType = info[UIImagePickerControllerMediaType];
     NSString *destinationPath = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:kSharedDir withIntermediateDirectories:YES attributes:nil error:nil];
 
     if ([mediaType isEqualToString:kTypeImage]) {
         UIImage *chosenImage = info[UIImagePickerControllerOriginalImage];

@@ -64,7 +64,7 @@
 			<key>cell</key>
 			<string>PSEditTextCell</string>
 			<key>default</key>
-			<string>/var/mobile/Library/Preferences/vcam_source.mp4</string>
+			<string>/var/jb/var/mobile/Library/Preferences/vcam_source.mp4</string>
 			<key>defaults</key>
 			<string>com.vcam.pro</string>
 			<key>key</key>

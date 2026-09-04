@@ -4,12 +4,49 @@
 #import <CoreImage/CoreImage.h>
 #import <UIKit/UIKit.h>
 
-static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
-// Media is stored alongside the prefs plist: that directory is reliably
-// readable from inside tweaked (sandboxed) target processes, unlike
-// /var/mobile/Media/DCIM which the app sandbox blocks.
-static NSString *const kDefaultVideoPath = @"/var/mobile/Library/Preferences/vcam_source.mp4";
-static NSString *const kDefaultImagePath = @"/var/mobile/Library/Preferences/vcam_source.png";
+static NSString *const kPrefsFileName = @"com.vcam.pro.plist";
+static NSString *const kVideoFileName = @"vcam_source.mp4";
+static NSString *const kImageFileName = @"vcam_source.png";
+
+// Candidate directories, in priority order, that hold shared config + media.
+// On Dopamine ROOTLESS the App Store app sandbox BLOCKS /var/mobile/Library/
+// Preferences (confirmed on-device: reloadPreferences prefsReadable=NO from
+// Telegram), so the rootless apex /var/jb is tried first: the injected dylib
+// itself loads from /var/jb/Library/MobileSubstrate, so the target process can
+// reach that apex. The legacy path is kept last only as a fallback.
+static NSArray<NSString *> *VCamSharedDirs(void) {
+    static NSArray *dirs;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dirs = @[
+            @"/var/jb/var/mobile/Library/Preferences",
+            @"/var/jb/tmp",
+            @"/var/mobile/Library/Preferences",
+        ];
+    });
+    return dirs;
+}
+
+// First existing file with this basename across the candidate dirs, or nil.
+static NSString *VCamFindExistingFile(NSString *fileName) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *dir in VCamSharedDirs()) {
+        NSString *p = [dir stringByAppendingPathComponent:fileName];
+        if ([fm fileExistsAtPath:p]) return p;
+    }
+    return nil;
+}
+
+// First readable prefs plist across the candidate dirs; reports where it came from.
+static NSDictionary *VCamReadSharedPrefs(NSString **outPath) {
+    for (NSString *dir in VCamSharedDirs()) {
+        NSString *p = [dir stringByAppendingPathComponent:kPrefsFileName];
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+        if (d) { if (outPath) *outPath = p; return d; }
+    }
+    return nil;
+}
+
 static CFStringRef const kVCamPrefsNotification = CFSTR("com.vcam.pro/preferencesChanged");
 
 static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -46,7 +83,7 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
         _enabled = YES;
         _sourceType = VCamSourceTypeVideo;
         _loopEnabled = YES;
-        _mediaPath = kDefaultVideoPath;
+        _mediaPath = nil; // resolved from prefs / by searching the shared dirs
         _mediaLoaded = NO;
         _videoReadingStarted = NO;
 
@@ -60,10 +97,34 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
             _ciContext = [CIContext context];
         }
 
+        [self probeSharedPaths];
         [self reloadPreferences];
         [self startListeningForNotifications];
     }
     return self;
+}
+
+// One-shot diagnostic: which of the candidate dirs can this (possibly sandboxed)
+// process actually read and write? Logged once so a wrong storage location shows
+// up immediately in the on-device log instead of costing a build cycle to guess.
+- (void)probeSharedPaths {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *dir in VCamSharedDirs()) {
+        BOOL isDir = NO;
+        BOOL exists = [fm fileExistsAtPath:dir isDirectory:&isDir];
+        BOOL readable = [fm isReadableFileAtPath:dir];
+        NSString *probe = [dir stringByAppendingPathComponent:@".vcam_probe"];
+        BOOL writable = [@"x" writeToFile:probe atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        if (writable) [fm removeItemAtPath:probe error:nil];
+        VCamLog(@"probe dir=%@ exists=%d isDir=%d readable=%d writable=%d",
+                dir, exists, isDir, readable, writable);
+    }
+    NSString *prefsAt = nil;
+    NSDictionary *d = VCamReadSharedPrefs(&prefsAt);
+    VCamLog(@"probe prefs found=%@ at=%@", d ? @"YES" : @"NO", prefsAt ?: @"(none)");
+    VCamLog(@"probe media video=%@ image=%@",
+            VCamFindExistingFile(kVideoFileName) ?: @"(none)",
+            VCamFindExistingFile(kImageFileName) ?: @"(none)");
 }
 
 - (void)startListeningForNotifications {
@@ -79,9 +140,10 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
 
 - (void)reloadPreferences {
     [_lock lock];
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-    VCamLog(@"reloadPreferences: prefsReadable=%@ enabled=%@ sourceType=%@ mediaPath=%@",
-            prefs ? @"YES" : @"NO",
+    NSString *prefsAt = nil;
+    NSDictionary *prefs = VCamReadSharedPrefs(&prefsAt);
+    VCamLog(@"reloadPreferences: prefsReadable=%@ at=%@ enabled=%@ sourceType=%@ mediaPath=%@",
+            prefs ? @"YES" : @"NO", prefsAt ?: @"(none)",
             prefs[@"enabled"], prefs[@"sourceType"], prefs[@"mediaPath"]);
     if (prefs) {
         if (prefs[@"enabled"] != nil) {
@@ -166,12 +228,21 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     _videoAsset = nil;
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:_mediaPath]) {
-        VCamLog(@"loadMedia: mediaPath NOT found: %@", _mediaPath);
-        if (_sourceType == VCamSourceTypeVideo && [fm fileExistsAtPath:kDefaultVideoPath]) {
-            _mediaPath = kDefaultVideoPath;
-        } else if (_sourceType == VCamSourceTypeImage && [fm fileExistsAtPath:kDefaultImagePath]) {
-            _mediaPath = kDefaultImagePath;
+    if (_mediaPath.length == 0 || ![fm fileExistsAtPath:_mediaPath]) {
+        if (_mediaPath.length) {
+            VCamLog(@"loadMedia: configured mediaPath NOT found: %@ -> searching shared dirs", _mediaPath);
+        }
+        // Search the candidate dirs by conventional basename, preferring the
+        // configured source type but falling back to whichever media exists.
+        NSString *found = nil;
+        if (_sourceType == VCamSourceTypeVideo) {
+            found = VCamFindExistingFile(kVideoFileName) ?: VCamFindExistingFile(kImageFileName);
+        } else {
+            found = VCamFindExistingFile(kImageFileName) ?: VCamFindExistingFile(kVideoFileName);
+        }
+        if (found) {
+            _mediaPath = found;
+            VCamLog(@"loadMedia: resolved media from shared dirs: %@", _mediaPath);
         } else {
             VCamLog(@"loadMedia: no usable media file (sandbox block or not selected) -> nothing to inject");
             _mediaLoaded = YES;
