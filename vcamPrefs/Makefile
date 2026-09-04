@@ -1,5 +1,5 @@
 TARGET := iphone:clang:16.5:16.5
-ARCHS = arm64 arm64e
+ARCHS = arm64
 THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
