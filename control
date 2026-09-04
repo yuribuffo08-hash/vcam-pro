@@ -1,8 +1,8 @@
 Package: com.vcam.pro
 Name: Virtual Camera Pro
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm64
-Description: Virtual Camera with Settings UI and Gallery Media Picker for iOS 17 Dopamine
+Description: Virtual Camera with Settings UI and Gallery Media Picker for iOS 17 Dopamine (AVFoundation Safe Hook)
 Maintainer: Community
 Author: OpenSource
 Section: Tweaks

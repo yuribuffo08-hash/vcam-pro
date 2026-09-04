@@ -1,8 +1,8 @@
 {
 	Filter = {
-		Executables = (
-			"/usr/sbin/mediaserverd",
-			mediaserverd,
+		Bundles = (
+			"com.apple.UIKit",
+			"com.apple.AVFoundation",
 		);
 	};
 }
