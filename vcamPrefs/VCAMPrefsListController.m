@@ -84,8 +84,13 @@ static NSString *const kTypeMovie = @"public.movie";
 
 - (void)respringUserspace {
     pid_t pid;
-    const char *args[] = {"sbreload", NULL};
-    posix_spawn(&pid, "/var/jb/usr/bin/sbreload", NULL, NULL, (char *const *)args, NULL);
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/sbreload"]) {
+        const char *args[] = {"sbreload", NULL};
+        posix_spawn(&pid, "/var/jb/usr/bin/sbreload", NULL, NULL, (char *const *)args, NULL);
+    } else {
+        const char *args[] = {"killall", "-9", "SpringBoard", NULL};
+        posix_spawn(&pid, "/var/jb/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
+    }
 }
 
 @end

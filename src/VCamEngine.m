@@ -4,12 +4,20 @@
 #import <UIKit/UIKit.h>
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.vcam.pro.plist";
-static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.mp4";
+static NSString *const kDefaultVideoPath = @"/var/mobile/Media/DCIM/vcam_source.mp4";
+static NSString *const kDefaultImagePath = @"/var/mobile/Media/DCIM/vcam_source.png";
+static CFStringRef const kVCamPrefsNotification = CFSTR("com.vcam.pro/preferencesChanged");
+
+static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    [[VCamEngine sharedEngine] reloadPreferences];
+}
 
 @interface VCamEngine () {
     CGImageRef _loadedCGImage;
-    NSMutableArray *_videoBufferQueue;
-    NSUInteger _currentVideoIndex;
+    AVAsset *_videoAsset;
+    AVAssetReader *_assetReader;
+    AVAssetReaderTrackOutput *_readerOutput;
+    BOOL _videoReadingStarted;
     CIContext *_ciContext;
     NSLock *_lock;
     BOOL _mediaLoaded;
@@ -31,37 +39,109 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
     self = [super init];
     if (self) {
         _lock = [[NSLock alloc] init];
-        _videoBufferQueue = [[NSMutableArray alloc] init];
-        _currentVideoIndex = 0;
         _enabled = YES;
         _sourceType = VCamSourceTypeVideo;
         _loopEnabled = YES;
-        _mediaPath = kDefaultMediaPath;
+        _mediaPath = kDefaultVideoPath;
         _mediaLoaded = NO;
-        _ciContext = nil;
+        _videoReadingStarted = NO;
+
+        NSDictionary *options = @{
+            kCIContextUseSoftwareRenderer: @(NO),
+            kCIContextWorkingColorSpace: [NSNull null],
+            kCIContextOutputColorSpace: [NSNull null]
+        };
+        _ciContext = [CIContext contextWithOptions:options];
+        if (!_ciContext) {
+            _ciContext = [CIContext context];
+        }
+
+        [self reloadPreferences];
+        [self startListeningForNotifications];
     }
     return self;
+}
+
+- (void)startListeningForNotifications {
+    CFNotificationCenterAddObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)(self),
+        OnPrefsChangedNotification,
+        kVCamPrefsNotification,
+        NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately
+    );
 }
 
 - (void)reloadPreferences {
     [_lock lock];
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (prefs) {
-        if (prefs[@"enabled"]) {
+        if (prefs[@"enabled"] != nil) {
             _enabled = [prefs[@"enabled"] boolValue];
         }
-        if (prefs[@"sourceType"]) {
+        if (prefs[@"sourceType"] != nil) {
             _sourceType = (VCamSourceType)[prefs[@"sourceType"] integerValue];
         }
-        if (prefs[@"loopEnabled"]) {
+        if (prefs[@"loopEnabled"] != nil) {
             _loopEnabled = [prefs[@"loopEnabled"] boolValue];
         }
         if (prefs[@"mediaPath"] && [prefs[@"mediaPath"] length] > 0) {
             _mediaPath = [prefs[@"mediaPath"] copy];
         }
     }
-    _mediaLoaded = NO; // Force reload media on next frame
+    _mediaLoaded = NO;
     [_lock unlock];
+}
+
+- (void)cleanupVideoReader {
+    if (_assetReader) {
+        if (_assetReader.status == AVAssetReaderStatusReading) {
+            [_assetReader cancelReading];
+        }
+        _assetReader = nil;
+    }
+    _readerOutput = nil;
+    _videoReadingStarted = NO;
+}
+
+- (BOOL)setupVideoReader {
+    [self cleanupVideoReader];
+
+    if (!_videoAsset) {
+        return NO;
+    }
+
+    NSError *error = nil;
+    _assetReader = [[AVAssetReader alloc] initWithAsset:_videoAsset error:&error];
+    if (error || !_assetReader) {
+        _assetReader = nil;
+        return NO;
+    }
+
+    NSArray *tracks = [_videoAsset tracksWithMediaType:AVMediaTypeVideo];
+    if (tracks.count == 0) {
+        [self cleanupVideoReader];
+        return NO;
+    }
+
+    AVAssetTrack *videoTrack = tracks[0];
+    NSDictionary *settings = @{
+        (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
+    };
+    _readerOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:settings];
+    _readerOutput.alwaysCopiesSampleData = NO;
+
+    if ([_assetReader canAddOutput:_readerOutput]) {
+        [_assetReader addOutput:_readerOutput];
+        if ([_assetReader startReading]) {
+            _videoReadingStarted = YES;
+            return YES;
+        }
+    }
+
+    [self cleanupVideoReader];
+    return NO;
 }
 
 - (void)loadMedia {
@@ -70,23 +150,25 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
         [_lock unlock];
         return;
     }
-    
-    // Reset previous media
+
     if (_loadedCGImage) {
         CGImageRelease(_loadedCGImage);
         _loadedCGImage = NULL;
     }
-    for (id buf in _videoBufferQueue) {
-        CVPixelBufferRef pixelBuf = (__bridge CVPixelBufferRef)buf;
-        CVPixelBufferRelease(pixelBuf);
-    }
-    [_videoBufferQueue removeAllObjects];
-    _currentVideoIndex = 0;
+    [self cleanupVideoReader];
+    _videoAsset = nil;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:_mediaPath]) {
-        _mediaLoaded = YES;
-        [_lock unlock];
-        return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:_mediaPath]) {
+        if (_sourceType == VCamSourceTypeVideo && [fm fileExistsAtPath:kDefaultVideoPath]) {
+            _mediaPath = kDefaultVideoPath;
+        } else if (_sourceType == VCamSourceTypeImage && [fm fileExistsAtPath:kDefaultImagePath]) {
+            _mediaPath = kDefaultImagePath;
+        } else {
+            _mediaLoaded = YES;
+            [_lock unlock];
+            return;
+        }
     }
 
     NSString *ext = [[_mediaPath pathExtension] lowercaseString];
@@ -99,38 +181,10 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
     } else if ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"]) {
         _sourceType = VCamSourceTypeVideo;
         NSURL *videoURL = [NSURL fileURLWithPath:_mediaPath];
-        AVAsset *asset = [AVAsset assetWithURL:videoURL];
-        NSError *error = nil;
-        AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
-        if (!error) {
-            NSArray *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
-            if (tracks.count > 0) {
-                AVAssetTrack *track = tracks[0];
-                NSDictionary *settings = @{ (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA) };
-                AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc] initWithTrack:track outputSettings:settings];
-                output.alwaysCopiesSampleData = NO;
-                if ([reader canAddOutput:output]) {
-                    [reader addOutput:output];
-                    [reader startReading];
-                    
-                    int maxFrames = 180; // Load up to 6 seconds safely
-                    int count = 0;
-                    while (reader.status == AVAssetReaderStatusReading && count < maxFrames) {
-                        CMSampleBufferRef sampleBuf = [output copyNextSampleBuffer];
-                        if (!sampleBuf) break;
-                        CVPixelBufferRef pixBuf = CMSampleBufferGetImageBuffer(sampleBuf);
-                        if (pixBuf) {
-                            CVPixelBufferRetain(pixBuf);
-                            [_videoBufferQueue addObject:(__bridge id)pixBuf];
-                            count++;
-                        }
-                        CFRelease(sampleBuf);
-                    }
-                    [reader cancelReading];
-                }
-            }
-        }
+        _videoAsset = [AVAsset assetWithURL:videoURL];
+        [self setupVideoReader];
     }
+
     _mediaLoaded = YES;
     [_lock unlock];
 }
@@ -145,26 +199,54 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
     }
 
     @autoreleasepool {
-        [_lock lock];
         CIImage *sourceImage = nil;
+        CMSampleBufferRef videoSampleToRelease = NULL;
 
-        if (_sourceType == VCamSourceTypeImage && _loadedCGImage) {
-            sourceImage = [CIImage imageWithCGImage:_loadedCGImage];
-        } else if (_sourceType == VCamSourceTypeVideo && _videoBufferQueue.count > 0) {
-            CVPixelBufferRef frameBuf = (__bridge CVPixelBufferRef)_videoBufferQueue[_currentVideoIndex];
-            sourceImage = [CIImage imageWithCVPixelBuffer:frameBuf];
-            if (_loopEnabled || _currentVideoIndex + 1 < _videoBufferQueue.count) {
-                _currentVideoIndex = (_currentVideoIndex + 1) % _videoBufferQueue.count;
+        [_lock lock];
+        @try {
+            if (_sourceType == VCamSourceTypeImage) {
+                if (_loadedCGImage) {
+                    sourceImage = [CIImage imageWithCGImage:_loadedCGImage];
+                }
+            } else if (_sourceType == VCamSourceTypeVideo) {
+                if (!_videoReadingStarted) {
+                    [self setupVideoReader];
+                }
+
+                if (_readerOutput) {
+                    CMSampleBufferRef sample = [_readerOutput copyNextSampleBuffer];
+                    if (!sample && _loopEnabled) {
+                        [self setupVideoReader];
+                        if (_readerOutput) {
+                            sample = [_readerOutput copyNextSampleBuffer];
+                        }
+                    }
+
+                    if (sample) {
+                        CVPixelBufferRef frameBuf = CMSampleBufferGetImageBuffer(sample);
+                        if (frameBuf) {
+                            sourceImage = [CIImage imageWithCVPixelBuffer:frameBuf];
+                            videoSampleToRelease = sample;
+                        } else {
+                            CFRelease(sample);
+                        }
+                    }
+                }
             }
+        } @finally {
+            [_lock unlock];
         }
-        [_lock unlock];
 
         if (!sourceImage) {
             return;
         }
 
         if (!_ciContext) {
-            NSDictionary *options = @{ kCIContextUseSoftwareRenderer: @(NO) };
+            NSDictionary *options = @{
+                kCIContextUseSoftwareRenderer: @(NO),
+                kCIContextWorkingColorSpace: [NSNull null],
+                kCIContextOutputColorSpace: [NSNull null]
+            };
             _ciContext = [CIContext contextWithOptions:options];
             if (!_ciContext) {
                 _ciContext = [CIContext context];
@@ -172,13 +254,15 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
         }
 
         if (!_ciContext) {
+            if (videoSampleToRelease) CFRelease(videoSampleToRelease);
             return;
         }
 
         size_t targetW = CVPixelBufferGetWidth(targetPixelBuffer);
         size_t targetH = CVPixelBufferGetHeight(targetPixelBuffer);
         CGRect extent = sourceImage.extent;
-        if (extent.size.width <= 0 || extent.size.height <= 0) {
+        if (extent.size.width <= 0 || extent.size.height <= 0 || targetW <= 0 || targetH <= 0) {
+            if (videoSampleToRelease) CFRelease(videoSampleToRelease);
             return;
         }
 
@@ -194,20 +278,26 @@ static NSString *const kDefaultMediaPath = @"/var/mobile/Media/DCIM/vcam_source.
         CGFloat offsetY = ((CGFloat)targetH - scaledExtent.size.height) / 2.0;
         CIImage *final = [scaled imageByApplyingTransform:CGAffineTransformMakeTranslation(offsetX, offsetY)];
 
-        CVPixelBufferLockBaseAddress(targetPixelBuffer, 0);
         [_ciContext render:final toCVPixelBuffer:targetPixelBuffer];
-        CVPixelBufferUnlockBaseAddress(targetPixelBuffer, 0);
+
+        if (videoSampleToRelease) {
+            CFRelease(videoSampleToRelease);
+        }
     }
 }
 
 - (void)dealloc {
+    CFNotificationCenterRemoveObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)(self),
+        kVCamPrefsNotification,
+        NULL
+    );
     if (_loadedCGImage) {
         CGImageRelease(_loadedCGImage);
+        _loadedCGImage = NULL;
     }
-    for (id buf in _videoBufferQueue) {
-        CVPixelBufferRef pixelBuf = (__bridge CVPixelBufferRef)buf;
-        CVPixelBufferRelease(pixelBuf);
-    }
+    [self cleanupVideoReader];
 }
 
 @end

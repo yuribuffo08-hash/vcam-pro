@@ -35,6 +35,7 @@ jobs:
       - name: Compile Debian Package
         run: |
           export THEOS=$HOME/theos
+          chmod +x layout/DEBIAN/postinst || true
           make clean
           make package FINALPACKAGE=1
 

@@ -108,7 +108,7 @@
 			<key>action</key>
 			<string>respringUserspace</string>
 			<key>label</key>
-			<string>Riavvia mediaserverd</string>
+			<string>Riavvia SpringBoard (Respring)</string>
 		</dict>
 	</array>
 	<key>title</key>
