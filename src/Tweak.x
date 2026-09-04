@@ -46,3 +46,23 @@
 }
 
 %end
+
+%ctor {
+    @autoreleasepool {
+        NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *processName = [[NSProcessInfo processInfo] processName];
+
+        // CRITICAL SAFETY SHIELD:
+        // Strictly prevent loading into SpringBoard, mediaserverd, backboardd, or background daemons.
+        if (!bundleId ||
+            [bundleId isEqualToString:@"com.apple.springboard"] ||
+            [bundleId isEqualToString:@"com.apple.mediaserverd"] ||
+            [processName isEqualToString:@"mediaserverd"] ||
+            [processName isEqualToString:@"SpringBoard"] ||
+            [processName isEqualToString:@"backboardd"]) {
+            return;
+        }
+
+        %init(AVCaptureVideoDataOutput = objc_getClass("AVCaptureVideoDataOutput"));
+    }
+}
