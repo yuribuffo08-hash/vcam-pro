@@ -1,8 +1,19 @@
 {
 	Filter = {
+		Mode = "Any";
 		Bundles = (
 			"com.apple.UIKit",
+			"com.apple.mobilesafari",
+			"com.apple.SafariViewService",
+		);
+		Executables = (
 			"com.apple.WebKit.GPU",
+			"com.apple.WebKit.WebContent",
+			"WebKit.GPU",
+			"WebKit.WebContent",
+			"MobileSafari",
+			"SafariViewService",
 		);
 	};
 }
+

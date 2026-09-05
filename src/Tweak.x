@@ -4,6 +4,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <dlfcn.h>
 
 // ---------------------------------------------------------------------------
 // Photo path. Apps that take a still use AVCapturePhotoOutput and read the
@@ -223,22 +224,31 @@ static char kVCamPreviewControllerKey;
 %ctor {
     @autoreleasepool {
         NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleId) {
+        NSString *procName = [[NSProcessInfo processInfo] processName];
+        NSString *identifier = bundleId ?: procName;
+        if (!identifier) {
             return;
         }
 
         // Strictly exclude SpringBoard, Preferences, and system UI processes to prevent respring loops
-        if ([bundleId isEqualToString:@"com.apple.springboard"] ||
-            [bundleId hasPrefix:@"com.apple.springboard."] ||
-            [bundleId isEqualToString:@"com.apple.Preferences"] ||
-            [bundleId isEqualToString:@"com.apple.backboardd"] ||
-            [bundleId isEqualToString:@"com.apple.CoreAuthUI"] ||
-            [bundleId isEqualToString:@"com.apple.InCallService"] ||
-            [bundleId isEqualToString:@"com.apple.ScreenSharingViewService"]) {
+        if ([identifier isEqualToString:@"com.apple.springboard"] ||
+            [identifier hasPrefix:@"com.apple.springboard."] ||
+            [identifier isEqualToString:@"com.apple.Preferences"] ||
+            [identifier isEqualToString:@"com.apple.backboardd"] ||
+            [identifier isEqualToString:@"com.apple.CoreAuthUI"] ||
+            [identifier isEqualToString:@"com.apple.InCallService"] ||
+            [identifier isEqualToString:@"com.apple.ScreenSharingViewService"] ||
+            [identifier isEqualToString:@"mediaserverd"] ||
+            [identifier isEqualToString:@"SpringBoard"] ||
+            [identifier isEqualToString:@"Preferences"]) {
             return;
         }
 
-        VCamLog(@"loaded in %@", bundleId);
+        // Ensure AVFoundation is loaded into the runtime before installing hooks
+        dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
+
+        VCamLog(@"loaded in identifier=%@ (bundle=%@, proc=%@)", identifier, bundleId, procName);
         %init;
     }
 }
+
