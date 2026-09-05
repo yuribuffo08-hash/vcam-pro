@@ -1,5 +1,6 @@
 #import "VCamEngine.h"
 #import "VCamLog.h"
+#import "VCamPreviewController.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -83,6 +84,92 @@
     }
 
     %orig(sampleBufferDelegate, sampleBufferCallbackQueue);
+}
+
+%end
+
+static char kVCamPreviewControllerKey;
+
+%hook AVCaptureVideoPreviewLayer
+
+- (instancetype)initWithSession:(AVCaptureSession *)session {
+    self = %orig;
+    if (self) {
+        VCamPreviewController *ctrl = [[VCamPreviewController alloc] initWithPreviewLayer:self];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, ctrl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return self;
+}
+
+- (instancetype)initWithSessionWithNoConnection:(AVCaptureSession *)session {
+    self = %orig;
+    if (self) {
+        VCamPreviewController *ctrl = [[VCamPreviewController alloc] initWithPreviewLayer:self];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, ctrl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return self;
+}
+
+- (instancetype)init {
+    self = %orig;
+    if (self) {
+        VCamPreviewController *ctrl = [[VCamPreviewController alloc] initWithPreviewLayer:self];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, ctrl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return self;
+}
+
+- (void)setSession:(AVCaptureSession *)session {
+    %orig;
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (!ctrl) {
+        ctrl = [[VCamPreviewController alloc] initWithPreviewLayer:self];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, ctrl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [ctrl updateSession];
+}
+
+- (void)layoutSublayers {
+    %orig;
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (!ctrl) {
+        ctrl = [[VCamPreviewController alloc] initWithPreviewLayer:self];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, ctrl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [ctrl updateLayout];
+}
+
+- (void)removeFromSuperlayer {
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (ctrl) {
+        [ctrl layerDidRemoveFromSuperlayer];
+    }
+    %orig;
+}
+
+- (void)setHidden:(BOOL)hidden {
+    %orig;
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (ctrl) {
+        [ctrl updateVisibility];
+    }
+}
+
+- (void)setOpacity:(float)opacity {
+    %orig;
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (ctrl) {
+        [ctrl updateVisibility];
+    }
+}
+
+- (void)dealloc {
+    VCamPreviewController *ctrl = objc_getAssociatedObject(self, &kVCamPreviewControllerKey);
+    if (ctrl) {
+        [ctrl stop];
+        objc_setAssociatedObject(self, &kVCamPreviewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    %orig;
 }
 
 %end

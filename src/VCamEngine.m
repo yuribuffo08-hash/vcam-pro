@@ -2,6 +2,7 @@
 #import "VCamLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
+#import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
 static NSString *const kPrefsFileName = @"com.vcam.pro.plist";
@@ -64,10 +65,24 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     BOOL _mediaLoaded;
     BOOL _debugFill;   // solid-colour test: see if the buffer we write feeds the preview
     BOOL _loggedFormat;
+
+    // --- shared frame clock (see header) ---
+    CMSampleBufferRef _currentSample;     // retained; backs _currentCIImage
+    CIImage *_currentCIImage;             // the frame every consumer sees
+    CFTimeInterval _playbackStart;        // wall-clock origin of this play-through
+    double _currentPTS;                   // presentation time of _currentCIImage, seconds
+    double _videoStartPTS;                // first frame PTS, for normalized timing
+    uint64_t _frameSerial;                // bumped whenever _currentCIImage changes
+    CGAffineTransform _videoTransform;    // track preferredTransform (upright correction)
+    BOOL _hasVideoTransform;
+
+    // --- preview rasterisation cache ---
+    CGImageRef _previewCGImage;
+    uint64_t _previewCGSerial;
 }
 @end
 
-// FourCC (e.g. '420v', 'BGRA') of a pixel format, for logging.
+// FourCC of a pixel format, for logging (e.g. 420v, BGRA).
 static NSString *VCamFourCC(OSType t) {
     char c[5] = { (char)((t >> 24) & 0xFF), (char)((t >> 16) & 0xFF),
                   (char)((t >> 8) & 0xFF), (char)(t & 0xFF), 0 };
@@ -113,16 +128,26 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     return sharedInstance;
 }
 
+- (uint64_t)frameSerial {
+    return _frameSerial;
+}
+
 - (instancetype)init {
     self = [super init];
     if (self) {
         _lock = [[NSLock alloc] init];
         _enabled = YES;
+        _previewEnabled = YES;
         _sourceType = VCamSourceTypeVideo;
         _loopEnabled = YES;
         _mediaPath = nil; // resolved from prefs / by searching the shared dirs
         _mediaLoaded = NO;
         _videoReadingStarted = NO;
+        _videoTransform = CGAffineTransformIdentity;
+        _hasVideoTransform = NO;
+        _frameSerial = 0;
+        _previewCGSerial = 0;
+        _videoStartPTS = -1.0;
 
         // NOTE: do NOT null out the output/working colour spaces. Camera buffers
         // are usually YUV (420v/420f); with colour management disabled CIContext
@@ -184,12 +209,15 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     [_lock lock];
     NSString *prefsAt = nil;
     NSDictionary *prefs = VCamReadSharedPrefs(&prefsAt);
-    VCamLog(@"reloadPreferences: prefsReadable=%@ at=%@ enabled=%@ sourceType=%@ mediaPath=%@",
+    VCamLog(@"reloadPreferences: prefsReadable=%@ at=%@ enabled=%@ preview=%@ sourceType=%@ mediaPath=%@",
             prefs ? @"YES" : @"NO", prefsAt ?: @"(none)",
-            prefs[@"enabled"], prefs[@"sourceType"], prefs[@"mediaPath"]);
+            prefs[@"enabled"], prefs[@"previewEnabled"], prefs[@"sourceType"], prefs[@"mediaPath"]);
     if (prefs) {
         if (prefs[@"enabled"] != nil) {
             _enabled = [prefs[@"enabled"] boolValue];
+        }
+        if (prefs[@"previewEnabled"] != nil) {
+            _previewEnabled = [prefs[@"previewEnabled"] boolValue];
         }
         if (prefs[@"sourceType"] != nil) {
             _sourceType = (VCamSourceType)[prefs[@"sourceType"] integerValue];
@@ -202,7 +230,30 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         }
     }
     _mediaLoaded = NO;
+    [self discardCurrentFrameLocked];
     [_lock unlock];
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.vcam.pro.internalPrefsChanged" object:nil];
+}
+
+#pragma mark - Frame clock
+
+// Drop the cached frame so the next request rebuilds it from the current media.
+// Caller holds _lock.
+- (void)discardCurrentFrameLocked {
+    if (_currentSample) {
+        CFRelease(_currentSample);
+        _currentSample = NULL;
+    }
+    _currentCIImage = nil;
+    if (_previewCGImage) {
+        CGImageRelease(_previewCGImage);
+        _previewCGImage = NULL;
+    }
+    _playbackStart = 0;
+    _currentPTS = 0;
+    _videoStartPTS = -1.0;
+    _frameSerial++;
 }
 
 - (void)cleanupVideoReader {
@@ -237,6 +288,19 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     }
 
     AVAssetTrack *videoTrack = tracks[0];
+
+    // AVAssetReaderTrackOutput hands back raw coded frames and does NOT apply
+    // the track's preferredTransform, so a clip recorded in portrait arrives
+    // rotated 90 degrees. Capture the transform once and apply it to every
+    // frame (applyVideoTransform:) so the fake feed comes out upright.
+    if (!_hasVideoTransform) {
+        _videoTransform = videoTrack.preferredTransform;
+        _hasVideoTransform = YES;
+        VCamLog(@"setupVideoReader: preferredTransform a=%.2f b=%.2f c=%.2f d=%.2f natural=%.0fx%.0f",
+                _videoTransform.a, _videoTransform.b, _videoTransform.c, _videoTransform.d,
+                videoTrack.naturalSize.width, videoTrack.naturalSize.height);
+    }
+
     NSDictionary *settings = @{
         (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
@@ -255,6 +319,122 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     return NO;
 }
 
+// Rotate/flip a decoded frame per the track transform, then move it back to a
+// (0,0) origin so downstream scaling can use extent directly.
+- (CIImage *)applyVideoTransform:(CIImage *)image {
+    if (!_hasVideoTransform || CGAffineTransformIsIdentity(_videoTransform)) {
+        return image;
+    }
+    // Rotation/flip only: the file's translation refers to the render surface,
+    // not to our extent, so it is dropped and re-derived below.
+    CIImage *rotated = [image imageByApplyingTransform:
+        CGAffineTransformMake(_videoTransform.a, _videoTransform.b,
+                              _videoTransform.c, _videoTransform.d, 0, 0)];
+    CGRect e = rotated.extent;
+    if (e.origin.x == 0 && e.origin.y == 0) return rotated;
+    return [rotated imageByApplyingTransform:
+        CGAffineTransformMakeTranslation(-e.origin.x, -e.origin.y)];
+}
+
+// Advance the reader until the current frame matches elapsed wall-clock time.
+// Caller holds _lock.
+- (void)advanceFrameIfNeededLocked {
+    if (_sourceType == VCamSourceTypeImage) {
+        if (!_currentCIImage && _loadedCGImage) {
+            _currentCIImage = [CIImage imageWithCGImage:_loadedCGImage];
+            _frameSerial++;
+        }
+        return;
+    }
+
+    if (!_videoReadingStarted) {
+        if (![self setupVideoReader]) return;
+        _playbackStart = 0;
+    }
+    if (!_readerOutput) return;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    if (_playbackStart <= 0) {
+        _playbackStart = now;
+    }
+    double elapsed = now - _playbackStart;
+
+    // The current frame is still within its display time: nothing to decode.
+    if (_currentCIImage && _currentPTS > elapsed) {
+        return;
+    }
+
+    // Bounded catch-up: after a stall, skip ahead a few frames rather than
+    // decoding the whole backlog in one call and stuttering the caller.
+    for (int guard = 0; guard < 8; guard++) {
+        CMSampleBufferRef sample = [_readerOutput copyNextSampleBuffer];
+        if (!sample) {
+            if (_loopEnabled && [self setupVideoReader]) {
+                _playbackStart = CACurrentMediaTime();
+                _videoStartPTS = -1.0;
+                _currentPTS = 0;
+                elapsed = 0;
+                continue;
+            }
+            break; // no more frames: keep showing the last one
+        }
+
+        CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sample);
+        if (!pb) {
+            CFRelease(sample);
+            continue;
+        }
+
+        if (_currentSample) CFRelease(_currentSample);
+        _currentSample = sample; // owns the buffer backing _currentCIImage
+        _currentCIImage = [self applyVideoTransform:[CIImage imageWithCVPixelBuffer:pb]];
+        _frameSerial++;
+
+        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        double rawPTS = CMTIME_IS_NUMERIC(pts) ? CMTimeGetSeconds(pts) : elapsed;
+        if (_videoStartPTS < 0) {
+            _videoStartPTS = rawPTS;
+        }
+        double normPTS = rawPTS - _videoStartPTS;
+        if (normPTS < 0) normPTS = 0;
+        _currentPTS = normPTS;
+        if (_currentPTS >= elapsed) break; // caught up with the wall clock
+    }
+}
+
+- (CIImage *)currentSourceCIImageHoldingSample:(CMSampleBufferRef *)sampleOut {
+    if (sampleOut) *sampleOut = NULL;
+    if (!_mediaLoaded) {
+        [self loadMedia];
+    }
+    CIImage *img = nil;
+    [_lock lock];
+    @try {
+        [self advanceFrameIfNeededLocked];
+        img = _currentCIImage;
+        if (sampleOut && _currentSample) {
+            *sampleOut = (CMSampleBufferRef)CFRetain(_currentSample);
+        }
+    } @finally {
+        [_lock unlock];
+    }
+    return img;
+}
+
+- (CIImage *)currentSourceCIImage {
+    return [self currentSourceCIImageHoldingSample:NULL];
+}
+
+- (CIContext *)ensureContext {
+    if (!_ciContext) {
+        _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+        if (!_ciContext) _ciContext = [CIContext context];
+    }
+    return _ciContext;
+}
+
+#pragma mark - Media loading
+
 - (void)loadMedia {
     [_lock lock];
     if (_mediaLoaded) {
@@ -267,7 +447,10 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _loadedCGImage = NULL;
     }
     [self cleanupVideoReader];
+    [self discardCurrentFrameLocked];
     _videoAsset = nil;
+    _hasVideoTransform = NO;
+    _videoTransform = CGAffineTransformIdentity;
 
     NSFileManager *fm = [NSFileManager defaultManager];
     if (_mediaPath.length == 0 || ![fm fileExistsAtPath:_mediaPath]) {
@@ -315,6 +498,8 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     [_lock unlock];
 }
 
+#pragma mark - Video data-output path
+
 - (void)processFrame:(CVPixelBufferRef)targetPixelBuffer {
     if (!_enabled || !targetPixelBuffer) {
         return;
@@ -337,7 +522,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 
     // Diagnostic: paint the buffer a solid colour and stop. If the preview turns
     // that colour, this buffer IS what the app shows and the render path is the
-    // bug; if the preview is unchanged, the app draws from a separate path.
+    // bug; if not, the preview is a separate path.
     if (_debugFill) {
         VCamFillSolid(targetPixelBuffer);
         static dispatch_once_t fillOnce;
@@ -345,62 +530,17 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         return;
     }
 
-    if (!_mediaLoaded) {
-        [self loadMedia];
-    }
-
     @autoreleasepool {
-        CIImage *sourceImage = nil;
-        CMSampleBufferRef videoSampleToRelease = NULL;
-
-        [_lock lock];
-        @try {
-            if (_sourceType == VCamSourceTypeImage) {
-                if (_loadedCGImage) {
-                    sourceImage = [CIImage imageWithCGImage:_loadedCGImage];
-                }
-            } else if (_sourceType == VCamSourceTypeVideo) {
-                if (!_videoReadingStarted) {
-                    [self setupVideoReader];
-                }
-
-                if (_readerOutput) {
-                    CMSampleBufferRef sample = [_readerOutput copyNextSampleBuffer];
-                    if (!sample && _loopEnabled) {
-                        [self setupVideoReader];
-                        if (_readerOutput) {
-                            sample = [_readerOutput copyNextSampleBuffer];
-                        }
-                    }
-
-                    if (sample) {
-                        CVPixelBufferRef frameBuf = CMSampleBufferGetImageBuffer(sample);
-                        if (frameBuf) {
-                            sourceImage = [CIImage imageWithCVPixelBuffer:frameBuf];
-                            videoSampleToRelease = sample;
-                        } else {
-                            CFRelease(sample);
-                        }
-                    }
-                }
-            }
-        } @finally {
-            [_lock unlock];
-        }
-
+        CMSampleBufferRef sampleToHold = NULL;
+        CIImage *sourceImage = [self currentSourceCIImageHoldingSample:&sampleToHold];
         if (!sourceImage) {
+            if (sampleToHold) CFRelease(sampleToHold);
             return;
         }
 
-        if (!_ciContext) {
-            _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
-            if (!_ciContext) {
-                _ciContext = [CIContext context];
-            }
-        }
-
-        if (!_ciContext) {
-            if (videoSampleToRelease) CFRelease(videoSampleToRelease);
+        CIContext *ctx = [self ensureContext];
+        if (!ctx) {
+            if (sampleToHold) CFRelease(sampleToHold);
             return;
         }
 
@@ -408,7 +548,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         size_t targetH = CVPixelBufferGetHeight(targetPixelBuffer);
         CGRect extent = sourceImage.extent;
         if (extent.size.width <= 0 || extent.size.height <= 0 || targetW <= 0 || targetH <= 0) {
-            if (videoSampleToRelease) CFRelease(videoSampleToRelease);
+            if (sampleToHold) CFRelease(sampleToHold);
             return;
         }
 
@@ -424,68 +564,31 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         CGFloat offsetY = ((CGFloat)targetH - scaledExtent.size.height) / 2.0;
         CIImage *final = [scaled imageByApplyingTransform:CGAffineTransformMakeTranslation(offsetX, offsetY)];
 
-        [_ciContext render:final toCVPixelBuffer:targetPixelBuffer];
+        [ctx render:final toCVPixelBuffer:targetPixelBuffer];
         static dispatch_once_t renderOnce;
         dispatch_once(&renderOnce, ^{ VCamLog(@"processFrame: first render into %zux%zu target buffer", targetW, targetH); });
 
-        if (videoSampleToRelease) {
-            CFRelease(videoSampleToRelease);
+        if (sampleToHold) {
+            CFRelease(sampleToHold);
         }
     }
 }
 
 #pragma mark - Still capture (photo path)
 
-// Current fake frame as a CIImage. For video, reads the next frame (looping).
-// Caller must CFRelease *sampleOut if non-NULL after it is done with the image.
-- (CIImage *)currentStillCIImage:(CMSampleBufferRef *)sampleOut {
-    if (sampleOut) *sampleOut = NULL;
-    if (!_mediaLoaded) [self loadMedia];
-
-    CIImage *img = nil;
-    [_lock lock];
-    @try {
-        if (_sourceType == VCamSourceTypeImage) {
-            if (_loadedCGImage) img = [CIImage imageWithCGImage:_loadedCGImage];
-        } else {
-            if (!_videoReadingStarted) [self setupVideoReader];
-            if (_readerOutput) {
-                CMSampleBufferRef s = [_readerOutput copyNextSampleBuffer];
-                if (!s && _loopEnabled) {
-                    [self setupVideoReader];
-                    if (_readerOutput) s = [_readerOutput copyNextSampleBuffer];
-                }
-                if (s) {
-                    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(s);
-                    if (pb) {
-                        img = [CIImage imageWithCVPixelBuffer:pb];
-                        if (sampleOut) *sampleOut = s; else CFRelease(s);
-                    } else {
-                        CFRelease(s);
-                    }
-                }
-            }
-        }
-    } @finally {
-        [_lock unlock];
-    }
-    return img;
-}
-
 - (CGImageRef)copyCurrentStillCGImage {
     if (!_enabled) return NULL;
     CGImageRef cg = NULL;
     @autoreleasepool {
-        CMSampleBufferRef s = NULL;
-        CIImage *img = [self currentStillCIImage:&s];
-        if (img) {
-            if (!_ciContext) {
-                _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
-                if (!_ciContext) _ciContext = [CIContext context];
-            }
-            if (_ciContext) cg = [_ciContext createCGImage:img fromRect:img.extent];
+        CMSampleBufferRef sampleToHold = NULL;
+        CIImage *img = [self currentSourceCIImageHoldingSample:&sampleToHold];
+        CIContext *ctx = [self ensureContext];
+        if (img && ctx) {
+            cg = [ctx createCGImage:img fromRect:img.extent];
         }
-        if (s) CFRelease(s);
+        if (sampleToHold) {
+            CFRelease(sampleToHold);
+        }
     }
     static dispatch_once_t once;
     dispatch_once(&once, ^{ VCamLog(@"copyCurrentStillCGImage: first still %@", cg ? @"produced" : @"FAILED"); });
@@ -504,6 +607,56 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     return data;
 }
 
+#pragma mark - Live preview path
+
+- (CGImageRef)copyCurrentPreviewCGImage {
+    if (!_enabled || !_previewEnabled) return NULL;
+
+    if (!_mediaLoaded) {
+        [self loadMedia];
+    }
+
+    // Check cached raster under lock
+    [_lock lock];
+    [self advanceFrameIfNeededLocked];
+    if (_previewCGImage && _previewCGSerial == _frameSerial) {
+        CGImageRef cached = CGImageRetain(_previewCGImage);
+        [_lock unlock];
+        return cached;
+    }
+    CIImage *img = _currentCIImage;
+    CMSampleBufferRef sampleToHold = _currentSample ? (CMSampleBufferRef)CFRetain(_currentSample) : NULL;
+    uint64_t serial = _frameSerial;
+    [_lock unlock];
+
+    if (!img) {
+        if (sampleToHold) CFRelease(sampleToHold);
+        return NULL;
+    }
+
+    CGImageRef cg = NULL;
+    @autoreleasepool {
+        CIContext *ctx = [self ensureContext];
+        if (ctx) cg = [ctx createCGImage:img fromRect:img.extent];
+    }
+
+    if (sampleToHold) {
+        CFRelease(sampleToHold);
+    }
+
+    if (!cg) return NULL;
+
+    [_lock lock];
+    if (_previewCGImage) CGImageRelease(_previewCGImage);
+    _previewCGImage = CGImageRetain(cg);
+    _previewCGSerial = serial;
+    [_lock unlock];
+
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ VCamLog(@"copyCurrentPreviewCGImage: first preview frame produced"); });
+    return cg; // +1, caller releases
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
@@ -515,6 +668,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         CGImageRelease(_loadedCGImage);
         _loadedCGImage = NULL;
     }
+    [self discardCurrentFrameLocked];
     [self cleanupVideoReader];
 }
 

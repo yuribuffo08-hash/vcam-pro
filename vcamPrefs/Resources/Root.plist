@@ -26,6 +26,20 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.vcam.pro</string>
+			<key>key</key>
+			<string>previewEnabled</string>
+			<key>label</key>
+			<string>Abilita Anteprima Live (Mirino)</string>
+			<key>PostNotification</key>
+			<string>com.vcam.pro/preferencesChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>Sorgente Multimediale</string>
