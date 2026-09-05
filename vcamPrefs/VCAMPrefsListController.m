@@ -8,6 +8,7 @@
 // it (the sandbox blocks /var/mobile/Library/Preferences for those targets).
 static NSString *const kSharedDir = @"/var/jb/var/mobile/Library/Preferences";
 static NSString *const kLegacyDir = @"/var/mobile/Library/Preferences";
+static NSString *const kTmpDir    = @"/tmp";
 static NSString *const kPrefsPath = @"/var/jb/var/mobile/Library/Preferences/com.vcam.pro.plist";
 static NSString *const kImageDest = @"/var/jb/var/mobile/Library/Preferences/vcam_source.png";
 static NSString *const kVideoDest = @"/var/jb/var/mobile/Library/Preferences/vcam_source.mp4";
@@ -15,6 +16,22 @@ static NSString *const kTypeImage = @"public.image";
 static NSString *const kTypeMovie = @"public.movie";
 
 @implementation VCAMPrefsListController
+
+// Mirror the prefs plist and any media files into /tmp so that highly
+// sandboxed processes (like com.apple.WebKit.GPU) can read them even if
+// they cannot reach /var/jb/var/mobile/Library/Preferences.
+- (void)mirrorToTmp {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *fn in @[@"com.vcam.pro.plist", @"vcam_source.mp4", @"vcam_source.png"]) {
+        NSString *src = [kSharedDir stringByAppendingPathComponent:fn];
+        NSString *dst = [kTmpDir stringByAppendingPathComponent:fn];
+        if ([fm fileExistsAtPath:src]) {
+            [fm removeItemAtPath:dst error:nil];
+            [fm copyItemAtPath:src toPath:dst error:nil];
+        }
+    }
+    VCamLog(@"mirrorToTmp: completed");
+}
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
@@ -54,6 +71,8 @@ static NSString *const kTypeMovie = @"public.movie";
             [fm copyItemAtPath:oldP toPath:newP error:nil];
         }
     }
+
+    [self mirrorToTmp];
 }
 
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
@@ -71,6 +90,8 @@ static NSString *const kTypeMovie = @"public.movie";
         dict[key] = value;
         [dict writeToFile:kPrefsPath atomically:YES];
     }
+
+    [self mirrorToTmp];
 
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
@@ -123,7 +144,9 @@ static NSString *const kTypeMovie = @"public.movie";
         dict[@"sourceType"] = [mediaType isEqualToString:kTypeMovie] ? @(1) : @(0);
         [dict writeToFile:kPrefsPath atomically:YES];
 
-        // Broadcast change immediately to mediaserverd via Darwin notification
+        [self mirrorToTmp];
+
+        // Broadcast change immediately via Darwin notification
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
             kVCamPrefsNotification,
@@ -152,3 +175,4 @@ static NSString *const kTypeMovie = @"public.movie";
 }
 
 @end
+

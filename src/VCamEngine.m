@@ -14,7 +14,9 @@ static NSString *const kImageFileName = @"vcam_source.png";
 // Preferences (confirmed on-device: reloadPreferences prefsReadable=NO from
 // Telegram), so the rootless apex /var/jb is tried first: the injected dylib
 // itself loads from /var/jb/Library/MobileSubstrate, so the target process can
-// reach that apex. The legacy path is kept last only as a fallback.
+// reach that apex. /tmp is included as a universal fallback that even the most
+// restrictive sandboxes (like com.apple.WebKit.GPU) can typically access.
+// The legacy path is kept last only as a fallback.
 static NSArray<NSString *> *VCamSharedDirs(void) {
     static NSArray *dirs;
     static dispatch_once_t once;
@@ -22,6 +24,7 @@ static NSArray<NSString *> *VCamSharedDirs(void) {
         dirs = @[
             @"/var/jb/var/mobile/Library/Preferences",
             @"/var/jb/tmp",
+            @"/tmp",
             @"/var/mobile/Library/Preferences",
         ];
     });
