@@ -1,6 +1,7 @@
 #import "VCamPreviewController.h"
 #import "VCamEngine.h"
 #import "VCamLog.h"
+#import <UIKit/UIKit.h>
 
 @interface VCamPreviewController () {
     dispatch_queue_t _renderQueue;
