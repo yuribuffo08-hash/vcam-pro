@@ -36,7 +36,7 @@ static NSString *const kTypeMovie = @"public.movie";
     NSMutableDictionary *shared = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath]
         ?: [NSMutableDictionary dictionary];
     if (legacyPrefs) {
-        for (NSString *k in @[@"enabled", @"previewEnabled", @"sourceType", @"loopEnabled", @"mediaPath"]) {
+        for (NSString *k in @[@"enabled", @"previewEnabled", @"audioEnabled", @"sourceType", @"loopEnabled", @"mediaPath"]) {
             if (legacyPrefs[k] != nil && shared[k] == nil) shared[k] = legacyPrefs[k];
         }
     }

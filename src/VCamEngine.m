@@ -59,6 +59,7 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     AVAsset *_videoAsset;
     AVAssetReader *_assetReader;
     AVAssetReaderTrackOutput *_readerOutput;
+    AVAssetReaderTrackOutput *_audioReaderOutput;
     BOOL _videoReadingStarted;
     CIContext *_ciContext;
     NSLock *_lock;
@@ -138,6 +139,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _lock = [[NSLock alloc] init];
         _enabled = YES;
         _previewEnabled = YES;
+        _audioEnabled = YES;
         _sourceType = VCamSourceTypeVideo;
         _loopEnabled = YES;
         _mediaPath = nil; // resolved from prefs / by searching the shared dirs
@@ -219,6 +221,9 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         if (prefs[@"previewEnabled"] != nil) {
             _previewEnabled = [prefs[@"previewEnabled"] boolValue];
         }
+        if (prefs[@"audioEnabled"] != nil) {
+            _audioEnabled = [prefs[@"audioEnabled"] boolValue];
+        }
         if (prefs[@"sourceType"] != nil) {
             _sourceType = (VCamSourceType)[prefs[@"sourceType"] integerValue];
         }
@@ -264,6 +269,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _assetReader = nil;
     }
     _readerOutput = nil;
+    _audioReaderOutput = nil;
     _videoReadingStarted = NO;
 }
 
@@ -309,10 +315,35 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 
     if ([_assetReader canAddOutput:_readerOutput]) {
         [_assetReader addOutput:_readerOutput];
-        if ([_assetReader startReading]) {
-            _videoReadingStarted = YES;
-            return YES;
+    } else {
+        [self cleanupVideoReader];
+        return NO;
+    }
+
+    // Configure audio track reader if audio track exists
+    NSArray *audioTracks = [_videoAsset tracksWithMediaType:AVMediaTypeAudio];
+    if (audioTracks.count > 0) {
+        AVAssetTrack *audioTrack = audioTracks[0];
+        NSDictionary *audioSettings = @{
+            AVFormatIDKey: @(kAudioFormatLinearPCM),
+            AVLinearPCMBitDepthKey: @(16),
+            AVLinearPCMIsFloatKey: @(NO),
+            AVLinearPCMIsBigEndianKey: @(NO),
+            AVLinearPCMIsNonInterleaved: @(NO)
+        };
+        _audioReaderOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack outputSettings:audioSettings];
+        _audioReaderOutput.alwaysCopiesSampleData = NO;
+        if ([_assetReader canAddOutput:_audioReaderOutput]) {
+            [_assetReader addOutput:_audioReaderOutput];
+            VCamLog(@"setupVideoReader: audio track attached to reader");
+        } else {
+            _audioReaderOutput = nil;
         }
+    }
+
+    if ([_assetReader startReading]) {
+        _videoReadingStarted = YES;
+        return YES;
     }
 
     [self cleanupVideoReader];
@@ -501,6 +532,10 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 #pragma mark - Video data-output path
 
 - (void)processFrame:(CVPixelBufferRef)targetPixelBuffer {
+    [self processFrame:targetPixelBuffer connection:nil];
+}
+
+- (void)processFrame:(CVPixelBufferRef)targetPixelBuffer connection:(AVCaptureConnection *)connection {
     if (!_enabled || !targetPixelBuffer) {
         return;
     }
@@ -512,12 +547,14 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     if (!_loggedFormat) {
         _loggedFormat = YES;
         OSType fmt = CVPixelBufferGetPixelFormatType(targetPixelBuffer);
-        VCamLog(@"processFrame: target fmt=%@(0x%08x) %zux%zu planar=%d iosurface=%d",
+        VCamLog(@"processFrame: target fmt=%@(0x%08x) %zux%zu planar=%d iosurface=%d connOrientation=%ld mirrored=%d",
                 VCamFourCC(fmt), (unsigned)fmt,
                 CVPixelBufferGetWidth(targetPixelBuffer),
                 CVPixelBufferGetHeight(targetPixelBuffer),
                 CVPixelBufferIsPlanar(targetPixelBuffer),
-                CVPixelBufferGetIOSurface(targetPixelBuffer) != NULL);
+                CVPixelBufferGetIOSurface(targetPixelBuffer) != NULL,
+                connection ? (long)connection.videoOrientation : -1,
+                connection ? (int)connection.isVideoMirrored : -1);
     }
 
     // Diagnostic: paint the buffer a solid colour and stop. If the preview turns
@@ -552,12 +589,35 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
             return;
         }
 
+        // Sensor orientation & aspect adaptation:
+        // When recording in portrait on iPhone, the camera hardware sensor delivers
+        // landscape buffers (e.g. 1920x1080, targetW > targetH). The recorder/app
+        // attaches a +90 deg rotation transform to the MP4 file so players show it upright.
+        // If our source image is portrait (extent.h > extent.w) and we draw it
+        // unrotated into the landscape buffer, the player rotates it by another 90 deg,
+        // and fitting 1080x1920 into 1920x1080 forces a 1.77x zoom.
+        // Pre-rotating by -90 deg (or +90 deg if mirrored/front) turns 1080x1920 into
+        // 1920x1080: scale is 1.0 (zero zoom), and the player's +90 deg rotation displays
+        // the video 100% upright and identical to the preview.
+        CIImage *preparedImage = sourceImage;
+        BOOL targetIsLandscape = (targetW > targetH);
+        BOOL sourceIsPortrait = (extent.size.height > extent.size.width);
+
+        if (targetIsLandscape && sourceIsPortrait) {
+            BOOL isMirrored = connection ? connection.isVideoMirrored : NO;
+            CGFloat rotAngle = isMirrored ? (CGFloat)M_PI_2 : (CGFloat)-M_PI_2;
+            CIImage *rotated = [preparedImage imageByApplyingTransform:CGAffineTransformMakeRotation(rotAngle)];
+            CGRect rExtent = rotated.extent;
+            preparedImage = [rotated imageByApplyingTransform:CGAffineTransformMakeTranslation(-rExtent.origin.x, -rExtent.origin.y)];
+            extent = preparedImage.extent;
+        }
+
         CGFloat scaleX = (CGFloat)targetW / extent.size.width;
         CGFloat scaleY = (CGFloat)targetH / extent.size.height;
         CGFloat scale = MAX(scaleX, scaleY);
 
         CGAffineTransform tScale = CGAffineTransformMakeScale(scale, scale);
-        CIImage *scaled = [sourceImage imageByApplyingTransform:tScale];
+        CIImage *scaled = [preparedImage imageByApplyingTransform:tScale];
 
         CGRect scaledExtent = scaled.extent;
         CGFloat offsetX = ((CGFloat)targetW - scaledExtent.size.width) / 2.0;
@@ -566,12 +626,62 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 
         [ctx render:final toCVPixelBuffer:targetPixelBuffer];
         static dispatch_once_t renderOnce;
-        dispatch_once(&renderOnce, ^{ VCamLog(@"processFrame: first render into %zux%zu target buffer", targetW, targetH); });
+        dispatch_once(&renderOnce, ^{ VCamLog(@"processFrame: first render into %zux%zu target buffer (rotated=%d)", targetW, targetH, (targetIsLandscape && sourceIsPortrait)); });
 
         if (sampleToHold) {
             CFRelease(sampleToHold);
         }
     }
+}
+
+#pragma mark - Audio data-output path
+
+- (void)processAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer {
+    if (!_enabled || !_audioEnabled || !sampleBuffer) return;
+    if (_sourceType != VCamSourceTypeVideo) return;
+
+    if (!_mediaLoaded) {
+        [self loadMedia];
+    }
+
+    [_lock lock];
+    if (!_audioReaderOutput) {
+        [_lock unlock];
+        return;
+    }
+
+    CMSampleBufferRef fakeSample = [_audioReaderOutput copyNextSampleBuffer];
+    if (!fakeSample && _loopEnabled) {
+        [self setupVideoReader];
+        if (_audioReaderOutput) {
+            fakeSample = [_audioReaderOutput copyNextSampleBuffer];
+        }
+    }
+    [_lock unlock];
+
+    if (!fakeSample) return;
+
+    CMBlockBufferRef targetBlock = CMSampleBufferGetDataBuffer(sampleBuffer);
+    CMBlockBufferRef sourceBlock = CMSampleBufferGetDataBuffer(fakeSample);
+    if (targetBlock && sourceBlock) {
+        size_t targetLen = CMBlockBufferGetDataLength(targetBlock);
+        size_t sourceLen = CMBlockBufferGetDataLength(sourceBlock);
+        char *targetPtr = NULL;
+        char *sourcePtr = NULL;
+        if (CMBlockBufferGetDataPointer(targetBlock, 0, NULL, NULL, &targetPtr) == kCVReturnSuccess &&
+            CMBlockBufferGetDataPointer(sourceBlock, 0, NULL, NULL, &sourcePtr) == kCVReturnSuccess &&
+            targetPtr && sourcePtr) {
+            size_t toCopy = MIN(targetLen, sourceLen);
+            memcpy(targetPtr, sourcePtr, toCopy);
+            if (targetLen > sourceLen) {
+                memset(targetPtr + toCopy, 0, targetLen - toCopy);
+            }
+        }
+    }
+    CFRelease(fakeSample);
+
+    static dispatch_once_t audioOnce;
+    dispatch_once(&audioOnce, ^{ VCamLog(@"processAudioSampleBuffer: first audio packet injected successfully"); });
 }
 
 #pragma mark - Still capture (photo path)

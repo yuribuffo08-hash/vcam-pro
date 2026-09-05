@@ -7,6 +7,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 
 @class CIImage;
+@class AVCaptureConnection;
 
 typedef NS_ENUM(NSInteger, VCamSourceType) {
     VCamSourceTypeImage = 0,
@@ -17,6 +18,7 @@ typedef NS_ENUM(NSInteger, VCamSourceType) {
 
 @property (nonatomic, assign) BOOL enabled;
 @property (nonatomic, assign) BOOL previewEnabled;   // live-preview overlay on/off
+@property (nonatomic, assign) BOOL audioEnabled;     // replace mic with video audio
 @property (nonatomic, assign) VCamSourceType sourceType;
 @property (nonatomic, assign) BOOL loopEnabled;
 @property (nonatomic, copy) NSString *mediaPath;
@@ -27,6 +29,8 @@ typedef NS_ENUM(NSInteger, VCamSourceType) {
 - (void)reloadPreferences;
 - (void)loadMedia;
 - (void)processFrame:(CVPixelBufferRef)targetPixelBuffer;
+- (void)processFrame:(CVPixelBufferRef)targetPixelBuffer connection:(AVCaptureConnection *)connection;
+- (void)processAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer;
 
 // ---------------------------------------------------------------------------
 // Shared frame clock.

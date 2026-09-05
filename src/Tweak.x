@@ -69,7 +69,9 @@
                         if (engine.enabled && sampleBuffer) {
                             CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
                             if (pixelBuffer) {
-                                [engine processFrame:pixelBuffer];
+                                [engine processFrame:pixelBuffer connection:connection];
+                            } else if (engine.audioEnabled) {
+                                [engine processAudioSampleBuffer:sampleBuffer];
                             }
                         }
                         ((void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp)(selfDelegate, targetSel, output, sampleBuffer, connection);
@@ -78,6 +80,50 @@
                     IMP newImp = imp_implementationWithBlock(swizzledBlock);
                     class_replaceMethod(delegateClass, targetSel, newImp, method_getTypeEncoding(origMethod));
                     VCamLog(@"hook installed on %@", NSStringFromClass(delegateClass));
+                }
+            }
+        }
+    }
+
+    %orig(sampleBufferDelegate, sampleBufferCallbackQueue);
+}
+
+%end
+
+%hook AVCaptureAudioDataOutput
+
+- (void)setSampleBufferDelegate:(id<AVCaptureAudioDataOutputSampleBufferDelegate>)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
+    if (sampleBufferDelegate) {
+        Class delegateClass = [sampleBufferDelegate class];
+        static NSMutableSet *hookedAudioClasses = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            hookedAudioClasses = [[NSMutableSet alloc] init];
+        });
+
+        @synchronized(hookedAudioClasses) {
+            if (![hookedAudioClasses containsObject:delegateClass]) {
+                [hookedAudioClasses addObject:delegateClass];
+
+                SEL targetSel = @selector(captureOutput:didOutputSampleBuffer:fromConnection:);
+                Method origMethod = class_getInstanceMethod(delegateClass, targetSel);
+                VCamLog(@"setSampleBufferDelegate (audio): delegate=%@ hasCaptureOutput=%@",
+                        NSStringFromClass(delegateClass), origMethod ? @"YES" : @"NO");
+                if (origMethod) {
+                    IMP origImp = method_getImplementation(origMethod);
+
+                    void (^audioBlock)(id, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *) =
+                    ^(id selfDelegate, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+                        VCamEngine *engine = [VCamEngine sharedEngine];
+                        if (engine.enabled && engine.audioEnabled && sampleBuffer) {
+                            [engine processAudioSampleBuffer:sampleBuffer];
+                        }
+                        ((void (*)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *))origImp)(selfDelegate, targetSel, output, sampleBuffer, connection);
+                    };
+
+                    IMP newImp = imp_implementationWithBlock(audioBlock);
+                    class_replaceMethod(delegateClass, targetSel, newImp, method_getTypeEncoding(origMethod));
+                    VCamLog(@"audio hook installed on %@", NSStringFromClass(delegateClass));
                 }
             }
         }
