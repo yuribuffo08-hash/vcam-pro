@@ -203,6 +203,8 @@ static char kVCamPreviewControllerKey;
     %orig;
 }
 
+%end
+
 // ---------------------------------------------------------------------------
 // WebKit / Safari Web View Hooks (Deep DOM Swap)
 // Injects the custom getUserMedia interception script into every WKWebView
