@@ -8,8 +8,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = VCamPro
 
-VCamPro_FILES = src/Tweak.x src/VCamEngine.m src/VCamPreviewController.m
-VCamPro_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreGraphics CoreImage QuartzCore
+VCamPro_FILES = src/Tweak.x src/VCamEngine.m src/VCamPreviewController.m src/VCamWebInjector.m
+VCamPro_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreGraphics CoreImage QuartzCore WebKit AudioToolbox
 VCamPro_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk

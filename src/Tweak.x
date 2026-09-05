@@ -1,7 +1,9 @@
 #import "VCamEngine.h"
 #import "VCamLog.h"
 #import "VCamPreviewController.h"
+#import "VCamWebInjector.h"
 #import <AVFoundation/AVFoundation.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
@@ -201,6 +203,62 @@ static char kVCamPreviewControllerKey;
     %orig;
 }
 
+// ---------------------------------------------------------------------------
+// WebKit / Safari Web View Hooks (Deep DOM Swap)
+// Injects the custom getUserMedia interception script into every WKWebView
+// ---------------------------------------------------------------------------
+
+%hook WKUserContentController
+
+- (instancetype)init {
+    self = %orig;
+    if (self) {
+        [[VCamWebInjector sharedInjector] injectIntoUserContentController:self];
+    }
+    return self;
+}
+
+- (void)addUserScript:(WKUserScript *)userScript {
+    [[VCamWebInjector sharedInjector] injectIntoUserContentController:self];
+    %orig(userScript);
+}
+
+%end
+
+%hook WKWebView
+
+- (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
+    if (configuration && configuration.userContentController) {
+        [[VCamWebInjector sharedInjector] injectIntoUserContentController:configuration.userContentController];
+    }
+    self = %orig(frame, configuration);
+    return self;
+}
+
+%end
+
+// ---------------------------------------------------------------------------
+// WebCore Native Video Capture Observer Hook
+// If the WebKit GPU process runs native camera capture, this intercepts frames
+// ---------------------------------------------------------------------------
+
+%group WebCoreGroup
+
+%hook WebCoreAVVideoCaptureSourceObserver
+
+- (void)captureOutput:(AVCaptureOutput *)captureOutput didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    VCamEngine *engine = [VCamEngine sharedEngine];
+    if (engine.enabled && sampleBuffer) {
+        CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        if (pixelBuffer) {
+            [engine processFrame:pixelBuffer connection:connection];
+        }
+    }
+    %orig(captureOutput, sampleBuffer, connection);
+}
+
+%end
+
 %end
 
 %ctor {
@@ -226,11 +284,18 @@ static char kVCamPreviewControllerKey;
             return;
         }
 
-        // Ensure AVFoundation is loaded into the runtime before installing hooks
+        // Ensure frameworks are loaded into the runtime before installing hooks
         dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_NOW);
+        dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW);
+        dlopen("/System/Library/PrivateFrameworks/WebCore.framework/WebCore", RTLD_NOW);
 
         VCamLog(@"loaded in identifier=%@ (bundle=%@, proc=%@)", identifier, bundleId, procName);
         %init;
+        Class observerClass = objc_getClass("WebCoreAVVideoCaptureSourceObserver");
+        if (observerClass) {
+            %init(WebCoreGroup, WebCoreAVVideoCaptureSourceObserver = observerClass);
+            VCamLog(@"WebCoreAVVideoCaptureSourceObserver hooked successfully");
+        }
     }
 }
 
