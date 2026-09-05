@@ -1,4 +1,4 @@
-﻿#import "VCamPreviewController.h"
+#import "VCamPreviewController.h"
 #import "VCamEngine.h"
 #import "VCamLog.h"
 
@@ -25,6 +25,8 @@
         _overlayLayer = [CALayer layer];
         _overlayLayer.name = @"VCamPreviewOverlay";
         _overlayLayer.masksToBounds = YES;
+        _overlayLayer.opaque = YES;
+        _overlayLayer.backgroundColor = [UIColor blackColor].CGColor;
         _overlayLayer.contentsGravity = kCAGravityResizeAspectFill;
         // Disable CoreAnimation default implicit animations for instantaneous updates
         _overlayLayer.actions = @{

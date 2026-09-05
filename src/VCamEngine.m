@@ -4,6 +4,8 @@
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <CoreAudio/CoreAudioTypes.h>
 
 static NSString *const kPrefsFileName = @"com.vcam.pro.plist";
 static NSString *const kVideoFileName = @"vcam_source.mp4";
@@ -62,17 +64,27 @@ static void OnPrefsChangedNotification(CFNotificationCenterRef center, void *obs
     AVAsset *_videoAsset;
     AVAssetReader *_assetReader;
     AVAssetReaderTrackOutput *_readerOutput;
-    AVAssetReaderTrackOutput *_audioReaderOutput;
     BOOL _videoReadingStarted;
-    CIContext *_ciContext;
+    CIContext *_videoContext;
+    CIContext *_previewContext;
     NSLock *_lock;
     BOOL _mediaLoaded;
     BOOL _debugFill;   // solid-colour test: see if the buffer we write feeds the preview
     BOOL _loggedFormat;
 
+    // --- audio track reader (completely independent from video) ---
+    AVAssetReader *_audioAssetReader;
+    AVAssetReaderTrackOutput *_audioTrackOutput;
+    NSMutableData *_audioBuffer;
+    NSLock *_audioLock;
+    BOOL _audioReadingStarted;
+    AudioStreamBasicDescription _activeAudioFormat;
+    BOOL _hasActiveAudioFormat;
+
     // --- shared frame clock (see header) ---
     CMSampleBufferRef _currentSample;     // retained; backs _currentCIImage
     CIImage *_currentCIImage;             // the frame every consumer sees
+    CIImage *_lastRenderedCIImage;        // fallback to ensure real camera never flashes
     CFTimeInterval _playbackStart;        // wall-clock origin of this play-through
     double _currentPTS;                   // presentation time of _currentCIImage, seconds
     double _videoStartPTS;                // first frame PTS, for normalized timing
@@ -140,6 +152,8 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     self = [super init];
     if (self) {
         _lock = [[NSLock alloc] init];
+        _audioLock = [[NSLock alloc] init];
+        _audioBuffer = [[NSMutableData alloc] init];
         _enabled = YES;
         _previewEnabled = YES;
         _audioEnabled = YES;
@@ -148,20 +162,19 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _mediaPath = nil; // resolved from prefs / by searching the shared dirs
         _mediaLoaded = NO;
         _videoReadingStarted = NO;
+        _audioReadingStarted = NO;
         _videoTransform = CGAffineTransformIdentity;
         _hasVideoTransform = NO;
         _frameSerial = 0;
         _previewCGSerial = 0;
         _videoStartPTS = -1.0;
+        _hasActiveAudioFormat = NO;
 
-        // NOTE: do NOT null out the output/working colour spaces. Camera buffers
-        // are usually YUV (420v/420f); with colour management disabled CIContext
-        // will not perform the RGB->YUV conversion and render:toCVPixelBuffer:
-        // effectively no-ops, which is why injected frames never showed.
-        _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
-        if (!_ciContext) {
-            _ciContext = [CIContext context];
-        }
+        _videoContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+        if (!_videoContext) _videoContext = [CIContext context];
+
+        _previewContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+        if (!_previewContext) _previewContext = [CIContext context];
 
         // Diagnostic toggle: create this file in Filza to force a solid-colour
         // fill (no rebuild needed) and see whether the preview reacts.
@@ -254,6 +267,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _currentSample = NULL;
     }
     _currentCIImage = nil;
+    _lastRenderedCIImage = nil;
     if (_previewCGImage) {
         CGImageRelease(_previewCGImage);
         _previewCGImage = NULL;
@@ -272,7 +286,6 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _assetReader = nil;
     }
     _readerOutput = nil;
-    _audioReaderOutput = nil;
     _videoReadingStarted = NO;
 }
 
@@ -323,27 +336,6 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         return NO;
     }
 
-    // Configure audio track reader if audio track exists
-    NSArray *audioTracks = [_videoAsset tracksWithMediaType:AVMediaTypeAudio];
-    if (audioTracks.count > 0) {
-        AVAssetTrack *audioTrack = audioTracks[0];
-        NSDictionary *audioSettings = @{
-            AVFormatIDKey: @(kAudioFormatLinearPCM),
-            AVLinearPCMBitDepthKey: @(16),
-            AVLinearPCMIsFloatKey: @(NO),
-            AVLinearPCMIsBigEndianKey: @(NO),
-            AVLinearPCMIsNonInterleaved: @(NO)
-        };
-        _audioReaderOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack outputSettings:audioSettings];
-        _audioReaderOutput.alwaysCopiesSampleData = NO;
-        if ([_assetReader canAddOutput:_audioReaderOutput]) {
-            [_assetReader addOutput:_audioReaderOutput];
-            VCamLog(@"setupVideoReader: audio track attached to reader");
-        } else {
-            _audioReaderOutput = nil;
-        }
-    }
-
     if ([_assetReader startReading]) {
         _videoReadingStarted = YES;
         return YES;
@@ -351,6 +343,126 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 
     [self cleanupVideoReader];
     return NO;
+}
+
+#pragma mark - Independent Audio Reader
+
+- (void)cleanupAudioReaderLocked {
+    if (_audioAssetReader) {
+        if (_audioAssetReader.status == AVAssetReaderStatusReading) {
+            [_audioAssetReader cancelReading];
+        }
+        _audioAssetReader = nil;
+    }
+    _audioTrackOutput = nil;
+    _audioReadingStarted = NO;
+    [_audioBuffer setLength:0];
+}
+
+- (BOOL)setupAudioReaderLockedWithFormat:(const AudioStreamBasicDescription *)asbd {
+    if (_audioAssetReader) {
+        if (_audioAssetReader.status == AVAssetReaderStatusReading) {
+            [_audioAssetReader cancelReading];
+        }
+        _audioAssetReader = nil;
+    }
+    _audioTrackOutput = nil;
+    _audioReadingStarted = NO;
+    // Note: unconsumed bytes in _audioBuffer are preserved during loop restart
+
+    if (!_videoAsset) {
+        return NO;
+    }
+
+    NSArray *audioTracks = [_videoAsset tracksWithMediaType:AVMediaTypeAudio];
+    if (audioTracks.count == 0) {
+        return NO;
+    }
+
+    AVAssetTrack *audioTrack = audioTracks[0];
+    NSError *error = nil;
+    _audioAssetReader = [[AVAssetReader alloc] initWithAsset:_videoAsset error:&error];
+    if (error || !_audioAssetReader) {
+        _audioAssetReader = nil;
+        return NO;
+    }
+
+    NSMutableDictionary *settings = [NSMutableDictionary dictionary];
+    settings[AVFormatIDKey] = @(kAudioFormatLinearPCM);
+
+    if (asbd && asbd->mFormatID == kAudioFormatLinearPCM) {
+        double sampleRate = asbd->mSampleRate > 0 ? asbd->mSampleRate : 44100.0;
+        uint32_t channels = asbd->mChannelsPerFrame > 0 ? asbd->mChannelsPerFrame : 2;
+        uint32_t bitDepth = asbd->mBitsPerChannel > 0 ? asbd->mBitsPerChannel : 16;
+        BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? YES : NO;
+        BOOL isBigEndian = (asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) ? YES : NO;
+        BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ? YES : NO;
+
+        settings[AVSampleRateKey] = @(sampleRate);
+        settings[AVNumberOfChannelsKey] = @(channels);
+        settings[AVLinearPCMBitDepthKey] = @(bitDepth);
+        settings[AVLinearPCMIsFloatKey] = @(isFloat);
+        settings[AVLinearPCMIsBigEndianKey] = @(isBigEndian);
+        settings[AVLinearPCMIsNonInterleaved] = @(isNonInterleaved);
+
+        _activeAudioFormat = *asbd;
+        _hasActiveAudioFormat = YES;
+    } else {
+        settings[AVSampleRateKey] = @(44100.0);
+        settings[AVNumberOfChannelsKey] = @(2);
+        settings[AVLinearPCMBitDepthKey] = @(16);
+        settings[AVLinearPCMIsFloatKey] = @(NO);
+        settings[AVLinearPCMIsBigEndianKey] = @(NO);
+        settings[AVLinearPCMIsNonInterleaved] = @(NO);
+        _hasActiveAudioFormat = NO;
+    }
+
+    _audioTrackOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack outputSettings:settings];
+    _audioTrackOutput.alwaysCopiesSampleData = NO;
+
+    if ([_audioAssetReader canAddOutput:_audioTrackOutput]) {
+        [_audioAssetReader addOutput:_audioTrackOutput];
+    } else {
+        // Fallback to standard 16-bit PCM if the hardware format cannot be negotiated directly
+        NSDictionary *fallback = @{
+            AVFormatIDKey: @(kAudioFormatLinearPCM),
+            AVLinearPCMBitDepthKey: @(16),
+            AVLinearPCMIsFloatKey: @(NO),
+            AVLinearPCMIsBigEndianKey: @(NO),
+            AVLinearPCMIsNonInterleaved: @(NO)
+        };
+        _audioTrackOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack outputSettings:fallback];
+        _audioTrackOutput.alwaysCopiesSampleData = NO;
+        if ([_audioAssetReader canAddOutput:_audioTrackOutput]) {
+            [_audioAssetReader addOutput:_audioTrackOutput];
+        } else {
+            _audioAssetReader = nil;
+            _audioTrackOutput = nil;
+            return NO;
+        }
+    }
+
+    if ([_audioAssetReader startReading]) {
+        _audioReadingStarted = YES;
+        VCamLog(@"setupAudioReader: started reading audio track (rate=%.0f chan=%u)",
+                settings[AVSampleRateKey] ? [settings[AVSampleRateKey] doubleValue] : 0,
+                settings[AVNumberOfChannelsKey] ? [settings[AVNumberOfChannelsKey] unsignedIntValue] : 0);
+        return YES;
+    }
+
+    _audioAssetReader = nil;
+    _audioTrackOutput = nil;
+    return NO;
+}
+
+- (BOOL)audioFormatChangedLocked:(const AudioStreamBasicDescription *)asbd {
+    if (!asbd) return NO;
+    if (!_hasActiveAudioFormat) return YES;
+    return (asbd->mSampleRate != _activeAudioFormat.mSampleRate ||
+            asbd->mChannelsPerFrame != _activeAudioFormat.mChannelsPerFrame ||
+            asbd->mBitsPerChannel != _activeAudioFormat.mBitsPerChannel ||
+            (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != (_activeAudioFormat.mFormatFlags & kAudioFormatFlagIsFloat) ||
+            (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != (_activeAudioFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved));
 }
 
 // Rotate/flip a decoded frame per the track transform, then move it back to a
@@ -376,6 +488,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     if (_sourceType == VCamSourceTypeImage) {
         if (!_currentCIImage && _loadedCGImage) {
             _currentCIImage = [CIImage imageWithCGImage:_loadedCGImage];
+            _lastRenderedCIImage = _currentCIImage;
             _frameSerial++;
         }
         return;
@@ -392,6 +505,12 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         _playbackStart = now;
     }
     double elapsed = now - _playbackStart;
+
+    // Resynchronize if wall clock drifted by more than 1.5s (e.g. app background or stall)
+    if (_currentPTS > 0 && (elapsed - _currentPTS) > 1.5) {
+        _playbackStart = now - _currentPTS;
+        elapsed = _currentPTS;
+    }
 
     // The current frame is still within its display time: nothing to decode.
     if (_currentCIImage && _currentPTS > elapsed) {
@@ -422,6 +541,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         if (_currentSample) CFRelease(_currentSample);
         _currentSample = sample; // owns the buffer backing _currentCIImage
         _currentCIImage = [self applyVideoTransform:[CIImage imageWithCVPixelBuffer:pb]];
+        _lastRenderedCIImage = _currentCIImage;
         _frameSerial++;
 
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
@@ -445,7 +565,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     [_lock lock];
     @try {
         [self advanceFrameIfNeededLocked];
-        img = _currentCIImage;
+        img = _currentCIImage ?: _lastRenderedCIImage;
         if (sampleOut && _currentSample) {
             *sampleOut = (CMSampleBufferRef)CFRetain(_currentSample);
         }
@@ -459,12 +579,20 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     return [self currentSourceCIImageHoldingSample:NULL];
 }
 
-- (CIContext *)ensureContext {
-    if (!_ciContext) {
-        _ciContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
-        if (!_ciContext) _ciContext = [CIContext context];
+- (CIContext *)ensureVideoContext {
+    if (!_videoContext) {
+        _videoContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+        if (!_videoContext) _videoContext = [CIContext context];
     }
-    return _ciContext;
+    return _videoContext;
+}
+
+- (CIContext *)ensurePreviewContext {
+    if (!_previewContext) {
+        _previewContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @(NO) }];
+        if (!_previewContext) _previewContext = [CIContext context];
+    }
+    return _previewContext;
 }
 
 #pragma mark - Media loading
@@ -485,6 +613,10 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     _videoAsset = nil;
     _hasVideoTransform = NO;
     _videoTransform = CGAffineTransformIdentity;
+
+    [_audioLock lock];
+    [self cleanupAudioReaderLocked];
+    [_audioLock unlock];
 
     NSFileManager *fm = [NSFileManager defaultManager];
     if (_mediaPath.length == 0 || ![fm fileExistsAtPath:_mediaPath]) {
@@ -574,11 +706,16 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         CMSampleBufferRef sampleToHold = NULL;
         CIImage *sourceImage = [self currentSourceCIImageHoldingSample:&sampleToHold];
         if (!sourceImage) {
+            [_lock lock];
+            sourceImage = _lastRenderedCIImage;
+            [_lock unlock];
+        }
+        if (!sourceImage) {
             if (sampleToHold) CFRelease(sampleToHold);
             return;
         }
 
-        CIContext *ctx = [self ensureContext];
+        CIContext *ctx = [self ensureVideoContext];
         if (!ctx) {
             if (sampleToHold) CFRelease(sampleToHold);
             return;
@@ -647,44 +784,68 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         [self loadMedia];
     }
 
-    [_lock lock];
-    if (!_audioReaderOutput) {
-        [_lock unlock];
+    CMBlockBufferRef targetBlock = CMSampleBufferGetDataBuffer(sampleBuffer);
+    if (!targetBlock) return;
+
+    size_t targetLen = CMBlockBufferGetDataLength(targetBlock);
+    if (targetLen == 0) return;
+
+    char *targetPtr = NULL;
+    if (CMBlockBufferGetDataPointer(targetBlock, 0, NULL, NULL, &targetPtr) != kCVReturnSuccess || !targetPtr) {
         return;
     }
 
-    CMSampleBufferRef fakeSample = [_audioReaderOutput copyNextSampleBuffer];
-    if (!fakeSample && _loopEnabled) {
-        [self setupVideoReader];
-        if (_audioReaderOutput) {
-            fakeSample = [_audioReaderOutput copyNextSampleBuffer];
-        }
-    }
-    [_lock unlock];
+    CMAudioFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+    const AudioStreamBasicDescription *asbd = formatDesc ? CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) : NULL;
 
-    if (!fakeSample) return;
-
-    CMBlockBufferRef targetBlock = CMSampleBufferGetDataBuffer(sampleBuffer);
-    CMBlockBufferRef sourceBlock = CMSampleBufferGetDataBuffer(fakeSample);
-    if (targetBlock && sourceBlock) {
-        size_t targetLen = CMBlockBufferGetDataLength(targetBlock);
-        size_t sourceLen = CMBlockBufferGetDataLength(sourceBlock);
-        char *targetPtr = NULL;
-        char *sourcePtr = NULL;
-        if (CMBlockBufferGetDataPointer(targetBlock, 0, NULL, NULL, &targetPtr) == kCVReturnSuccess &&
-            CMBlockBufferGetDataPointer(sourceBlock, 0, NULL, NULL, &sourcePtr) == kCVReturnSuccess &&
-            targetPtr && sourcePtr) {
-            size_t toCopy = MIN(targetLen, sourceLen);
-            memcpy(targetPtr, sourcePtr, toCopy);
-            if (targetLen > sourceLen) {
-                memset(targetPtr + toCopy, 0, targetLen - toCopy);
+    [_audioLock lock];
+    @try {
+        if (!_audioReadingStarted || [self audioFormatChangedLocked:asbd]) {
+            if (![self setupAudioReaderLockedWithFormat:asbd]) {
+                return;
             }
         }
-    }
-    CFRelease(fakeSample);
 
-    static dispatch_once_t audioOnce;
-    dispatch_once(&audioOnce, ^{ VCamLog(@"processAudioSampleBuffer: first audio packet injected successfully"); });
+        // Fill _audioBuffer FIFO until we have at least targetLen bytes
+        while (_audioBuffer.length < targetLen) {
+            CMSampleBufferRef fakeSample = [_audioTrackOutput copyNextSampleBuffer];
+            if (!fakeSample) {
+                if (_loopEnabled && [self setupAudioReaderLockedWithFormat:asbd]) {
+                    fakeSample = [_audioTrackOutput copyNextSampleBuffer];
+                }
+            }
+            if (!fakeSample) {
+                break; // No more audio data available
+            }
+
+            CMBlockBufferRef srcBlock = CMSampleBufferGetDataBuffer(fakeSample);
+            if (srcBlock) {
+                size_t srcLen = CMBlockBufferGetDataLength(srcBlock);
+                char *srcPtr = NULL;
+                if (CMBlockBufferGetDataPointer(srcBlock, 0, NULL, NULL, &srcPtr) == kCVReturnSuccess && srcPtr && srcLen > 0) {
+                    [_audioBuffer appendBytes:srcPtr length:srcLen];
+                }
+            }
+            CFRelease(fakeSample);
+        }
+
+        if (_audioBuffer.length >= targetLen) {
+            memcpy(targetPtr, _audioBuffer.bytes, targetLen);
+            [_audioBuffer replaceBytesInRange:NSMakeRange(0, targetLen) withBytes:NULL length:0];
+        } else if (_audioBuffer.length > 0) {
+            size_t avail = _audioBuffer.length;
+            memcpy(targetPtr, _audioBuffer.bytes, avail);
+            memset(targetPtr + avail, 0, targetLen - avail);
+            [_audioBuffer setLength:0];
+        } else {
+            memset(targetPtr, 0, targetLen);
+        }
+
+        static dispatch_once_t audioOnce;
+        dispatch_once(&audioOnce, ^{ VCamLog(@"processAudioSampleBuffer: first audio packet injected successfully (len=%zu)", targetLen); });
+    } @finally {
+        [_audioLock unlock];
+    }
 }
 
 #pragma mark - Still capture (photo path)
@@ -695,7 +856,12 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
     @autoreleasepool {
         CMSampleBufferRef sampleToHold = NULL;
         CIImage *img = [self currentSourceCIImageHoldingSample:&sampleToHold];
-        CIContext *ctx = [self ensureContext];
+        if (!img) {
+            [_lock lock];
+            img = _lastRenderedCIImage;
+            [_lock unlock];
+        }
+        CIContext *ctx = [self ensurePreviewContext];
         if (img && ctx) {
             cg = [ctx createCGImage:img fromRect:img.extent];
         }
@@ -737,7 +903,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         [_lock unlock];
         return cached;
     }
-    CIImage *img = _currentCIImage;
+    CIImage *img = _currentCIImage ?: _lastRenderedCIImage;
     CMSampleBufferRef sampleToHold = _currentSample ? (CMSampleBufferRef)CFRetain(_currentSample) : NULL;
     uint64_t serial = _frameSerial;
     [_lock unlock];
@@ -749,7 +915,7 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
 
     CGImageRef cg = NULL;
     @autoreleasepool {
-        CIContext *ctx = [self ensureContext];
+        CIContext *ctx = [self ensurePreviewContext];
         if (ctx) cg = [ctx createCGImage:img fromRect:img.extent];
     }
 
@@ -781,8 +947,14 @@ static void VCamFillSolid(CVPixelBufferRef pb) {
         CGImageRelease(_loadedCGImage);
         _loadedCGImage = NULL;
     }
+    [_lock lock];
     [self discardCurrentFrameLocked];
     [self cleanupVideoReader];
+    [_lock unlock];
+
+    [_audioLock lock];
+    [self cleanupAudioReaderLocked];
+    [_audioLock unlock];
 }
 
 @end
